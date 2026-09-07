@@ -63,10 +63,10 @@ android {
 
     signingConfigs {
         register("chaoxingsignfaker") {
-            storeFile file("..\\chaoxingsignfaker.jks")
-            storePassword System.getenv("keystorePassword")
+            storeFile file("../mykey.jks")
+            storePassword "d4c0cbbba012ba8de2380701"
             keyAlias "chaoxingsignfaker"
-            keyPassword System.getenv("keystorePassword")
+            keyPassword "d4c0cbbba012ba8de2380701"
         }
     }
     buildFeatures {
