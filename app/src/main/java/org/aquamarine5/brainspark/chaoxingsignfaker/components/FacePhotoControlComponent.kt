@@ -84,17 +84,18 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.aquamarine5.brainspark.chaoxingsignfaker.R
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingFaceHelper
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClientPool
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpRequesterPool
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.ChaoxingFaceRecognitionImage
+import org.aquamarine5.brainspark.chaoxingsignfaker.ui.theme.Orange
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingFaceImageException
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.LocalSnackbarHostState
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.chaoxingDataStore
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.decodePhotoBitmap
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.displaySnackbar
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.scaleDownToMaxDimension
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.snackbarReport
 
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FacePhotoControlComponent(
     phoneNumber: String,
@@ -162,7 +163,7 @@ fun FacePhotoControlComponent(
         }
         coroutineScope.launch {
             runCatching {
-                val client = ChaoxingHttpClientPool.get(context, phoneNumber)
+                val client = ChaoxingHttpRequesterPool.getRequester(context, phoneNumber)
                 ChaoxingFaceHelper.saveFaceImage(
                     client,
                     context,
@@ -185,7 +186,8 @@ fun FacePhotoControlComponent(
 
     fun cropAndSave(bitmap: Bitmap) {
         coroutineScope.launch {
-            when (val result = imageCropper.crop(bitmap.asImageBitmap())) {
+            val safeBitmap = bitmap.scaleDownToMaxDimension()
+            when (val result = imageCropper.crop(safeBitmap.asImageBitmap())) {
                 is CropResult.Success -> save(result.bitmap.asAndroidBitmap())
                 CropResult.Cancelled -> Unit
                 else -> snackbarHost.displaySnackbar("裁剪人脸照片失败", coroutineScope)
@@ -323,39 +325,12 @@ fun FacePhotoControlComponent(
                 },
                 title = { Text("是否删除照片？") },
                 text = {
-                    Card(
-                        shape = RoundedCornerShape(18.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = Color(
-                                0xFFFCC307
-                            )
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(0.dp, 6.dp),
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Spacer(Modifier.width(4.dp))
-                            Icon(
-                                painterResource(R.drawable.ic_triangle_alert),
-                                contentDescription = "Alert",
-                                tint = Color.White,
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "在此删除照片并不会在其他已经导入你的人脸识别照片的设备上一并删除。",
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                lineHeight = 18.sp,
-                                fontWeight = FontWeight.W500,
-                            )
-                        }
-                    }
+                    CommonCardTip(
+                        icon = R.drawable.ic_triangle_alert,
+                        containerColor = Orange,
+                        contentColor = Color.Black,
+                        text = "在此删除照片并不会在其他已经导入你的人脸识别照片的设备上一并删除。"
+                    )
                 },
                 confirmButton = {
                     Button(onClick = {

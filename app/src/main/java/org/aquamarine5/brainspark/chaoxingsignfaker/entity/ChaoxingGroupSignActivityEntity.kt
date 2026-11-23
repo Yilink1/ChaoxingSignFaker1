@@ -7,16 +7,18 @@
 package org.aquamarine5.brainspark.chaoxingsignfaker.entity
 
 import androidx.compose.runtime.Immutable
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.SignDestination
+import kotlinx.coroutines.Deferred
 
 @Immutable
 data class ChaoxingGroupSignActivityEntity(
-    val signDestination: SignDestination,
+    val signDestination: Deferred<SignDestination>,
     val title: String,
     val activeId: Long,
     val classId: Int,
-    val courseId: Int,
+    val courseId: Long,
     val courseName: String,
     val startTimeTitle: String,
-    val activeTypeName: String
+    val activeTypeName: String,
+    val isUnsupportedLegacySign: Boolean = false,
+    val messageTimestamp: Long = 0L
 )

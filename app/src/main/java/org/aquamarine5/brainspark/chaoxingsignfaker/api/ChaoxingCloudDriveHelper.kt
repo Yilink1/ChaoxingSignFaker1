@@ -13,7 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import com.alibaba.fastjson2.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -41,12 +41,12 @@ object ChaoxingCloudDriveHelper {
                 onResult(uri)
             }
         )
-        LaunchedEffect(Unit) {
+        SideEffect(Unit) {
             gallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
         }
     }
 
-    suspend fun getCloudToken(client: ChaoxingHttpClient): String = withContext(Dispatchers.IO) {
+    suspend fun getCloudToken(client: ChaoxingHttpRequester): String = withContext(Dispatchers.IO) {
         client.storageCloudToken?.let { return@withContext it }
         client.newCall(Request.Builder().url(URL_CLOUD_TOKEN).build()).execute().use {
             it.checkResponseThrowException()
@@ -60,14 +60,14 @@ object ChaoxingCloudDriveHelper {
         val bitmap = runCatching {
             context.contentResolver.decodePhotoBitmap(uri)
                 ?: throw ChaoxingPhotoSignException("无法读取照片")
-        }.getOrElse { throw ChaoxingPhotoSignException("文件转换失败") }
+        }.getOrElse { throw ChaoxingPhotoSignException("文件转换失败", it) }
         ByteArrayOutputStream().use { out ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, 50, out)
             return out.toByteArray().toRequestBody("image/jpeg".toMediaType())
         }
     }
 
-    suspend fun uploadImage(client: ChaoxingHttpClient, image: Bitmap): String =
+    suspend fun uploadImage(client: ChaoxingHttpRequester, image: Bitmap): String =
         withContext(Dispatchers.IO) {
             val filename = "${UUID.randomUUID()}.jpg"
             ByteArrayOutputStream().use { out ->
@@ -75,7 +75,7 @@ object ChaoxingCloudDriveHelper {
                 client.newCall(
                     Request.Builder().url(URL_CLOUD_UPLOAD + getCloudToken(client)).post(
                         MultipartBody.Builder().setType(MultipartBody.FORM)
-                            .addFormDataPart("puid", client.userEntity.puid.toString())
+                            .addFormDataPart("puid", client.puid.toString())
                             .addFormDataPart(
                                 "file",
                                 filename,
@@ -91,7 +91,7 @@ object ChaoxingCloudDriveHelper {
         }
 
     suspend fun uploadImage(
-        client: ChaoxingHttpClient,
+        client: ChaoxingHttpRequester,
         context: Context,
         uri: Uri
     ): String =
@@ -100,7 +100,7 @@ object ChaoxingCloudDriveHelper {
             client.newCall(
                 Request.Builder().url(URL_CLOUD_UPLOAD + getCloudToken(client)).post(
                     MultipartBody.Builder().setType(MultipartBody.FORM)
-                        .addFormDataPart("puid", client.userEntity.puid.toString())
+                        .addFormDataPart("puid", client.puid.toString())
                         .addFormDataPart(
                             "file",
                             filename,

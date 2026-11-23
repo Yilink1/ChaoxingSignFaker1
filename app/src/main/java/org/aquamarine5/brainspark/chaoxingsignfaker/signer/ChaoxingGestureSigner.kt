@@ -11,14 +11,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpRequester
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingLocationSignEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignOutEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.screen.GestureSignDestination
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.checkResponseThrowException
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.requirePredictable
 
 class ChaoxingGestureSigner(
-    client: ChaoxingHttpClient,
+    client: ChaoxingHttpRequester,
     private val destination: GestureSignDestination,
     baseSignInfo: JSONObject? = null
 ) : ChaoxingSigner(
@@ -27,11 +28,33 @@ class ChaoxingGestureSigner(
     destination.classId,
     destination.courseId,
     destination.extContent,
-    baseSignInfo
+    baseSignInfo,
+    destination.isOldSignVersion,
+    destination.chatId
 ) {
     companion object {
         private val URL_CHECK_GESTURE =
             "https://mobilelearn.chaoxing.com/widget/sign/pcStuSignController/checkSignCode".toHttpUrl()
+        private val URL_WEIXIN_PRESIGN =
+            "https://mobilewx.chaoxing.com/widget/weixin/sign/stuSignController/preSign".toHttpUrl()
+        private val SIGN_CODE_PATTERN = """id="signCode"\s+value="([^"]+)""".toRegex()
+    }
+
+    suspend fun getGestureSignCode(): String = withContext(Dispatchers.IO) {
+        if (isOldSignVersion) return@withContext ""
+        client.newCall(
+            Request.Builder().get().url(
+                URL_WEIXIN_PRESIGN.newBuilder()
+                    .addQueryParameter("activeId", activeId.toString())
+                    .addQueryParameter("puid", client.puid.toString())
+                    .build()
+            ).build()
+        ).execute().use {
+            it.checkResponseThrowException()
+            val signCode = SIGN_CODE_PATTERN.find(it.body.string())?.groupValues?.get(1)
+            requirePredictable(!signCode.isNullOrBlank()) { "未能从微信签到页获取手势图案" }
+            signCode
+        }
     }
 
     suspend fun getGestureSignInfo(): ChaoxingSignOutEntity = withContext(Dispatchers.IO) {
@@ -49,6 +72,7 @@ class ChaoxingGestureSigner(
     }
 
     suspend fun checkSignGesture(gestureOrderCode: String): Boolean = withContext(Dispatchers.IO) {
+        if (isOldSignVersion) return@withContext true
         client.newCall(
             Request.Builder().url(
                 URL_CHECK_GESTURE.newBuilder()
@@ -64,58 +88,62 @@ class ChaoxingGestureSigner(
 
     suspend fun sign(
         gestureOrderCode: String,
-        position: ChaoxingLocationSignEntity? = null
+        position: ChaoxingLocationSignEntity? = null,
+        captchaValidate: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        if (isCaptchaRequired()) return@withContext true
-        client.newCall(
-            Request.Builder().url(
-                URL_SIGN.newBuilder()
-                    .addQueryParameter("latitude", if(position != null) "%.6f".format(position.latitude) else "")
-                    .addQueryParameter("longitude", if(position != null) "%.6f".format(position.longitude) else "")
-                    .addQueryParameter("activeId", destination.activeId.toString())
-                    .addQueryParameter("uid", client.userEntity.puid.toString())
-                    .addQueryParameter("name", client.userEntity.name)
-                    .addQueryParameter("fid", client.userEntity.fid.toString())
-                    .addQueryParameter("signCode", gestureOrderCode)
-                    .addQueryParameter("deviceCode", client.deviceCode)
-                    .addLocationResultParameter(position)
-                    .addLocationParameter(position,false)
-                    .build()
-            ).build()
-        ).execute().use {
-            it.checkResponseThrowException()
-            return@use it.checkSignResult()
-        }
-    }
-
-    suspend fun signWithCaptcha(
-        gestureOrderCode: String,
-        validateValue: String,
-        position: ChaoxingLocationSignEntity? = null
-    ) =
-        withContext(Dispatchers.IO) {
-            client.newCall(
+        if (isOldSignVersion) {
+            return@withContext client.newCall(
                 Request.Builder().url(
-                    URL_SIGN.newBuilder()
-                        .addQueryParameter("latitude", if(position != null) "%.6f".format(position.latitude) else "")
-                        .addQueryParameter("longitude", if(position != null) "%.6f".format(position.longitude) else "")
-                        .addQueryParameter("activeId", destination.activeId.toString())
-                        .addQueryParameter("uid", client.userEntity.puid.toString())
-                        .addQueryParameter("name", client.userEntity.name)
-                        .addQueryParameter("fid", client.userEntity.fid.toString())
-                        .addQueryParameter("signCode", gestureOrderCode)
-                        .addQueryParameter("deviceCode", client.deviceCode)
-                        .addLocationResultParameter(position)
-                        .addQueryParameter("validate", validateValue)
-                        .addLocationParameter(position,false)
-                        .build()
+                    buildOldSignUrlBuilder().build()
                 ).build()
             ).execute().use {
                 it.checkResponseThrowException()
                 return@use it.checkSignResult()
             }
         }
+        client.newCall(
+            Request.Builder().url(
+                URL_SIGN_NO_PARAMETER.newBuilder()
+                    .addQueryParameter("activeId", destination.activeId.toString())
+                    .addCourseIdParameter()
+                    .addQueryParameter("uid", client.puid.toString())
+                    .addQueryParameter("clientip", "")
+                    .addQueryParameter(
+                        "latitude",
+                        if (position != null) "%.6f".format(position.randomizedLatitude) else "-1"
+                    )
+                    .addQueryParameter(
+                        "longitude",
+                        if (position != null) "%.6f".format(position.randomizedLongitude) else "-1"
+                    )
+                    .addQueryParameter("appType", "15")
+                    .addQueryParameter("fid", client.configuredFid.toString())
+                    .addQueryParameter("name", client.name)
+                    .addQueryParameter("signCode", gestureOrderCode)
+                    .addQueryParameter("deviceCode", client.deviceCode)
+                    .addLocationParameter(position, false)
+                    .addLocationResultParameter(position)
+                    .addEnc2Parameter(signEnc2)
+                    .addValidateQueryParameter(captchaValidate)
+                    .build()
+            ).header(
+                "Referer", getOriginPreSignUrl().toString()
+            ).postSignForm().build()
+        ).execute().use {
+            it.checkResponseThrowException()
+            return@use it.checkSignResult(position)
+        }
+    }
 
-    override suspend fun checkAlreadySign(response: String): Boolean =
-        !response.contains("传达的手势图案")
+    @Deprecated(
+        "Use sign instead",
+        ReplaceWith("sign(gestureOrderCode, position, captchaValidate)")
+    )
+    suspend fun signWithCaptcha(
+        gestureOrderCode: String,
+        validateValue: String,
+        position: ChaoxingLocationSignEntity? = null
+    ) = sign(gestureOrderCode, position, validateValue)
+
+    override val notSignedPageMarkers: List<String> = listOf("传达的手势图案")
 }

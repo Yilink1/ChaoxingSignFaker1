@@ -25,6 +25,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.aquamarine5.brainspark.chaoxingsignfaker.R
 import org.aquamarine5.brainspark.chaoxingsignfaker.signer.ChaoxingSigner
 import org.aquamarine5.brainspark.chaoxingsignfaker.ui.theme.Orange
@@ -120,7 +121,7 @@ data class ChaoxingSignStatus(
                             else -> {
                                 Color(0xFFF43E06)
                             }
-                        }
+                        }, lineHeight = 16.sp
                     )
                 }
             }
@@ -128,6 +129,10 @@ data class ChaoxingSignStatus(
             null -> {
                 if (isLoading.value)
                     CircularProgressIndicator(modifier = Modifier.size(32.dp))
+                else if (error.value.isNotEmpty())
+                    Text(
+                        error.value, color = Orange, lineHeight = 16.sp
+                    )
             }
         }
 

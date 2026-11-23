@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2025-2026, @aquamarine5 (@海蓝色的咕咕鸽). All Rights Reserved.
  * Author: aquamarine5@163.com (Github: https://github.com/aquamarine5) and Brainspark (previously RenegadeCreation)
  * Repository: https://github.com/aquamarine5/ChaoxingSignFaker
@@ -57,38 +57,46 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import org.aquamarine5.brainspark.chaoxingsignfaker.R
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingCloudDriveHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingCourseHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClientPool
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpRequesterPool
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingRecommendHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingSignHelper
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.SignDestination
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CameraComponent
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CaptchaHandlerDialog
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CaptchaHandlerParams
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CenterCircularProgressIndicator
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.NetworkExceptionComponent
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.OldSignVersionWarningTips
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.NotReadyToSignNoticeComponent
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.OtherUserSelectorComponent
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.SignOutRedirectTips
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.SignPotentialWarningTips
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.SnackbarAlertDialog
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.SponsorPopupDialog
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.cloneSessionGuard
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.httpClientGuard
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.ChaoxingOtherUserSession
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignActivityEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignActivityStatus
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignOutEntity
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignResult
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignStatus
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.SignDestination
 import org.aquamarine5.brainspark.chaoxingsignfaker.signer.ChaoxingPhotoSigner
 import org.aquamarine5.brainspark.chaoxingsignfaker.signer.ChaoxingSignHandler
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.LocalSnackbarHostState
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.UMengHelper
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.decodePhotoBitmap
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.randomizeStylizeImage
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.snackbarReport
 
 typealias ChaoxingPhotoActivityEntity = PhotoSignDestination
@@ -98,12 +106,14 @@ typealias ChaoxingPhotoActivityEntity = PhotoSignDestination
 data class PhotoSignDestination(
     override val activeId: Long,
     override val classId: Int,
-    override val courseId: Int,
+    override val courseId: Long,
     val extContent: String,
     val startTime: Long?,
     override val endTime: Long?,
     val isLate: Boolean,
-    override val isCloneSession: Boolean
+    override val isCloneSession: Boolean,
+    override val isOldSignVersion: Boolean = false,
+    override val chatId: Long? = null
 ) : SignDestination {
     companion object {
         fun parseFromSignActivityEntity(
@@ -133,12 +143,14 @@ fun PhotoSignScreen(
     navToOtherSign: (SignDestination) -> Unit,
     navToOtherUserDestination: () -> Unit
 ) {
+    if (!cloneSessionGuard(destination.isCloneSession, onCloneInvalid = navBack)) return
+    val client = httpClientGuard(onNavigateBack = navBack) ?: return
     val snackbarHost = LocalSnackbarHostState.current
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val signer = remember {
+    val signer = remember(client) {
         ChaoxingPhotoSigner(
-            ChaoxingHttpClient.instance!!,
+            client,
             destination
         )
     }
@@ -173,12 +185,12 @@ fun PhotoSignScreen(
                         client,
                         destination
                     ).let {
-                        signActivityStatus = it.preSign()
+                        signActivityStatus = it.preSign(context)
                         it.ifPhotoRequiredLogin()
                     }
                 }
             } else {
-                signActivityStatus = signer.preSign()
+                signActivityStatus = signer.preSign(context)
                 signer.ifPhotoRequiredLogin()
             }
             isImage = data.first
@@ -198,10 +210,22 @@ fun PhotoSignScreen(
             NetworkExceptionComponent(v.exceptionOrNull()!!) {
                 coroutineScope.launch {
                     isFetchedFailure = runCatching {
-                        val data = signer.ifPhotoRequiredLogin()
+                        val data = if (destination.isCloneSession) {
+                            ChaoxingHttpClient.cloneInstance!!.let { client ->
+                                ChaoxingPhotoSigner(
+                                    client,
+                                    destination
+                                ).let {
+                                    signActivityStatus = it.preSign(context)
+                                    it.ifPhotoRequiredLogin()
+                                }
+                            }
+                        } else {
+                            signActivityStatus = signer.preSign(context)
+                            signer.ifPhotoRequiredLogin()
+                        }
                         isImage = data.first
                         signoffEntity = data.second
-                        signActivityStatus = signer.preSign()
                     }.onFailure {
                         it.snackbarReport(
                             snackbarHost,
@@ -214,233 +238,57 @@ fun PhotoSignScreen(
         } else {
             Crossfade(signActivityStatus) { c ->
                 if (c == ChaoxingSignActivityStatus.READY_TO_SIGN) {
-                    if (isImage == false) {
-                        Column(
-                            modifier = Modifier.padding(8.dp, 4.dp, 8.dp, 0.dp)
-                        ) {
+                    Crossfade(isImage) { image ->
+                        if (image == false) {
+                            Column(
+                                modifier = Modifier.padding(8.dp, 4.dp, 8.dp, 0.dp)
+                            ) {
 
-                            val isSigning = remember { mutableStateOf(false) }
-                            val signStatus =
-                                remember { mutableListOf(ChaoxingSignStatus(hapticFeedback)) }
-                            val userSelections = remember { mutableStateListOf(isForSelf.not()) }
-                            val signHandler = remember {
-                                ChaoxingSignHandler<Unit>(
-                                    context = context,
-                                    onSelfSigning = { _ ->
-                                        runCatching {
-                                            if (signer.signByClick()) {
-                                                suspendCancellableCoroutine { continuation ->
-                                                    captchaValidateParams =
-                                                        signer to { validateValue ->
-                                                            if (continuation.isActive)
-                                                                continuation.resumeWith(
-                                                                    validateValue.onSuccess {
-                                                                        signer.signByClickWithCaptcha(
-                                                                            it
+                                val isSigning = remember { mutableStateOf(false) }
+                                val signStatus =
+                                    remember { mutableListOf(ChaoxingSignStatus(hapticFeedback)) }
+                                val userSelections =
+                                    remember { mutableStateListOf(isForSelf.not()) }
+                                val signHandler = remember {
+                                    ChaoxingSignHandler<Unit>(
+                                        context = context,
+                                        onSelfSigning = { _ ->
+                                            runCatching {
+                                                if (signer.signByClick()) {
+                                                    val resolution =
+                                                        suspendCancellableCoroutine { continuation ->
+                                                            captchaValidateParams =
+                                                                signer to { captchaResult ->
+                                                                    if (continuation.isActive)
+                                                                        continuation.resumeWith(
+                                                                            captchaResult
                                                                         )
-                                                                    })
+                                                                }
                                                         }
-                                                }
-                                                return@runCatching true
-                                            } else
-                                                return@runCatching false
-                                        }
-                                    },
-                                    onOtherUserSigning = { _, session, bypassChecking, _ ->
-                                        runCatching {
-                                            ChaoxingHttpClientPool.get(context, session.phoneNumber)
-                                                .let { client ->
-                                                    ChaoxingPhotoSigner(
-                                                        client,
-                                                        if (isAlwaysForceSign || bypassChecking) destination.copy(
-                                                            classId = ChaoxingCourseHelper.getClassIdFromCourseId(
-                                                                client,
-                                                                destination.courseId
-                                                            ).getOrNull() ?: destination.classId
-                                                        ) else destination,
-                                                        signer.getSignInfo()
-                                                    ).run {
-                                                        if (!(isAlwaysForceSign || bypassChecking)) checkSignStatusThrowException()
-                                                        if (signByClick()) {
-                                                            suspendCancellableCoroutine { continuation ->
-                                                                captchaValidateParams =
-                                                                    this to { validateValue ->
-                                                                        if (continuation.isActive) {
-                                                                            continuation.resumeWith(
-                                                                                runCatching {
-                                                                                    validateValue.onSuccess {
-                                                                                        this.signByClickWithCaptcha(
-                                                                                            it
-                                                                                        )
-                                                                                    }.getOrThrow()
-                                                                                })
-                                                                        }
-                                                                    }
-                                                            }
-                                                            return@runCatching true
-                                                        } else return@runCatching false
-                                                    }
-                                                }
-                                        }
-                                    },
-                                    destination = destination,
-                                    onSigningFinished = { _, name, isOtherUser ->
-                                        coroutineScope.launch {
-                                            UMengHelper.onSignClickEvent(context, name, isOtherUser)
-                                        }
-                                    },
-                                    onAllSigningFinished = { isSuccessful ->
-                                        isSigning.value = false
-                                        if (isSuccessful)
-                                            coroutineScope.launch {
-                                                delay(ChaoxingSignHelper.TIMEOUT_SHOW_SPONSOR_AFTER_ALL_SIGNED)
-                                                isSponsor = true
+                                                    signer.signByClick(
+                                                        resolution.validate
+                                                    )
+                                                    return@runCatching ChaoxingSignResult(
+                                                        isCaptchaSigning = true,
+                                                        isCaptchaResolvedByModel = resolution.resolvedByModel
+                                                    )
+                                                } else
+                                                    return@runCatching ChaoxingSignResult(
+                                                        isCaptchaSigning = false,
+                                                        isCaptchaResolvedByModel = false
+                                                    )
                                             }
-                                    }, userSelections = userSelections,
-                                    signStatus = signStatus
-                                )
-                            }
-                            OtherUserSelectorComponent(
-                                navToOtherUser = {
-                                    navToOtherUserDestination()
-                                },
-                                signStatus,
-                                isCurrentAlreadySigned = isForSelf,
-                                userSelections = userSelections,
-                                isSigning = isSigning,
-                                prefixTipsContent = {
-                                    if (signoffEntity != null)
-                                        SignOutRedirectTips(
-                                            signoffEntity!!
-                                        ) {
-                                            navToOtherSign(it)
-                                        }
-                                    if (destination.startTime != null)
-                                        SignPotentialWarningTips(
-                                            destination.startTime,
-                                            destination.endTime,
-                                            destination.isLate
-                                        )
-                                },
-                                isCloneSession = destination.isCloneSession,
-                                onRetrySignAction = { index, session, bypassChecking ->
-                                    signHandler.retryOtherUserSigning(session, index, bypassChecking)
-                                }
-                            ) { isSelf, otherUserSessionList, _ ->
-                                isSigning.value = true
-                                signHandler.startSigning(
-                                    Unit,
-                                    isSelf,
-                                    otherUserSessionList,
-                                    hapticFeedback,
-                                    coroutineScope,
-                                    snackbarHost
-                                )
-                            }
-                        }
-                    } else if (isImage == true) {
-                        var isSignForOther by remember { mutableStateOf<Boolean?>(null) }
-                        Crossfade(isSignForOther) { value ->
-                            when (value) {
-                                null -> {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .padding(16.dp),
-                                        verticalArrangement = Arrangement.Center,
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        Icon(painterResource(R.drawable.ic_image_up), null)
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        Text("这是一个图片签到")
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        Button(
-                                            onClick = {
-                                                hapticFeedback.performHapticFeedback(
-                                                    HapticFeedbackType.ContextClick
+                                        },
+                                        onOtherUserSigning = { _, session, bypassChecking, _ ->
+                                            runCatching {
+                                                ChaoxingHttpRequesterPool.getRequester(
+                                                    context,
+                                                    session.phoneNumber
                                                 )
-                                                isSignForOther = false
-                                            },
-                                            enabled = isForSelf.not(),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) { Text("为自己签到（从图库读取图片）") }
-                                        Button(
-                                            onClick = {
-                                                hapticFeedback.performHapticFeedback(
-                                                    HapticFeedbackType.ContextClick
-                                                )
-                                                isSignForOther = true
-                                            }, modifier = Modifier.fillMaxWidth()
-                                        ) { Text("为多人签到（拍摄或从图库读取多张图片）") }
-                                    }
-                                }
-
-                                true -> {
-                                    val userSelections =
-                                        remember { mutableStateListOf(isForSelf.not()) }
-                                    val signStatus =
-                                        remember {
-                                            mutableListOf(
-                                                ChaoxingSignStatus(
-                                                    hapticFeedback
-                                                )
-                                            )
-                                        }
-                                    var isCamera by remember { mutableStateOf(false) }
-                                    val isSigning = remember { mutableStateOf(false) }
-                                    var isSelfForSign by remember { mutableStateOf(false) }
-                                    var bitmapList by remember {
-                                        mutableStateOf<List<Bitmap>>(
-                                            emptyList()
-                                        )
-                                    }
-                                    val otherUserSessionForSignList =
-                                        remember {
-                                            mutableStateListOf<ChaoxingOtherUserSession?>()
-                                        }
-                                    var bitmapIndexList by remember {
-                                        mutableStateOf<List<Int>>(
-                                            emptyList()
-                                        )
-                                    }
-
-                                    val signHandler = remember {
-                                        ChaoxingSignHandler<List<Bitmap>>(
-                                            context = context,
-                                            onSelfSigning = { value ->
-                                                runCatching {
-                                                    ChaoxingCloudDriveHelper.uploadImage(
-                                                        ChaoxingHttpClient.instance!!,
-                                                        value[0]
-                                                    ).let { objectId ->
-                                                        if (signer.signByImage(objectId)) {
-                                                            suspendCancellableCoroutine { continuation ->
-                                                                captchaValidateParams =
-                                                                    signer to { validateValue ->
-                                                                        if (continuation.isActive)
-                                                                            continuation.resumeWith(
-                                                                                validateValue.onSuccess {
-                                                                                    signer.signByImageWithCaptcha(
-                                                                                        objectId,
-                                                                                        it
-                                                                                    )
-                                                                                })
-                                                                    }
-                                                            }
-                                                            return@runCatching true
-                                                        } else return@runCatching false
-                                                    }
-                                                }
-                                            },
-                                            onOtherUserSigning = { value, session, bypassChecking, index ->
-                                                runCatching {
-                                                    ChaoxingHttpClientPool.get(
-                                                        context,
-                                                        session.phoneNumber
-                                                    ).let { client ->
+                                                    .let { client ->
                                                         ChaoxingPhotoSigner(
                                                             client,
-                                                            if (isAlwaysForceSign || bypassChecking) destination.copy(
+                                                            if (isAlwaysForceSign || bypassChecking || (destination.isOldSignVersion && destination.courseId > 0L)) destination.copy(
                                                                 classId = ChaoxingCourseHelper.getClassIdFromCourseId(
                                                                     client,
                                                                     destination.courseId
@@ -448,387 +296,633 @@ fun PhotoSignScreen(
                                                             ) else destination,
                                                             signer.getSignInfo()
                                                         ).run {
-                                                            if (!(isAlwaysForceSign || bypassChecking)) checkSignStatusThrowException()
-                                                            val objectId =
-                                                                ChaoxingCloudDriveHelper.uploadImage(
-                                                                    client,
-                                                                    value[bitmapIndexList.indexOf(
-                                                                        index + 1
-                                                                    )]
-                                                                )
-                                                            if (signByImage(objectId)) {
-                                                                suspendCancellableCoroutine { continuation ->
-                                                                    captchaValidateParams =
-                                                                        this to { validateValue ->
-                                                                            if (continuation.isActive) {
-                                                                                continuation.resumeWith(
-                                                                                    runCatching {
-                                                                                        validateValue.onSuccess {
-                                                                                            this.signByImageWithCaptcha(
-                                                                                                objectId,
-                                                                                                it
-                                                                                            )
-                                                                                        }
-                                                                                            .getOrThrow()
-                                                                                    })
+                                                            if (!(isAlwaysForceSign || bypassChecking)) checkSignStatusThrowException(
+                                                                context
+                                                            )
+                                                            if (signByClick()) {
+                                                                val resolution =
+                                                                    suspendCancellableCoroutine { continuation ->
+                                                                        captchaValidateParams =
+                                                                            this to { captchaResult ->
+                                                                                if (continuation.isActive) {
+                                                                                    continuation.resumeWith(
+                                                                                        captchaResult
+                                                                                    )
+                                                                                }
                                                                             }
-                                                                        }
-                                                                }
-                                                                return@runCatching true
-                                                            } else return@runCatching false
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            onSigningFinished = { _, name, isOtherUser ->
-                                                coroutineScope.launch {
-                                                    UMengHelper.onSignPhotoEvent(
-                                                        context,
-                                                        name,
-                                                        isOtherUser
-                                                    )
-                                                }
-
-                                            },
-                                            onAllSigningFinished = { isSuccessful ->
-                                                isSigning.value = false
-                                                if (isSuccessful) {
-                                                    coroutineScope.launch {
-                                                        delay(ChaoxingSignHelper.TIMEOUT_SHOW_SPONSOR_AFTER_ALL_SIGNED)
-                                                        isSponsor = true
-                                                    }
-                                                }
-                                            },
-                                            destination = destination,
-                                            userSelections = userSelections,
-                                            signStatus = signStatus
-                                        )
-                                    }
-                                    BackHandler(isSignForOther == true && !isCamera) {
-                                        isSignForOther = null
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .zIndex(0f)
-                                            .fillMaxSize()
-                                    ) {
-                                        Column(
-                                            modifier = Modifier.padding(8.dp, 4.dp, 8.dp, 0.dp)
-                                        ) {
-                                            OtherUserSelectorComponent(
-                                                navToOtherUser = {
-                                                    navToOtherUserDestination()
-                                                },
-                                                signStatus,
-                                                isCloneSession = destination.isCloneSession,
-                                                isCurrentAlreadySigned = isForSelf,
-                                                userSelections = userSelections,
-                                                isSigning = isSigning,
-                                                prefixTipsContent = {
-                                                    if (signoffEntity != null)
-                                                        SignOutRedirectTips(
-                                                            signoffEntity!!
-                                                        ) {
-                                                            navToOtherSign(it)
-                                                        }
-                                                    if (destination.startTime != null)
-                                                        SignPotentialWarningTips(
-                                                            destination.startTime,
-                                                            destination.endTime,
-                                                            destination.isLate
-                                                        )
-                                                }, onRetrySignAction = { index, session, bypassChecking ->
-                                                    signHandler.retryOtherUserSigning(
-                                                        session,
-                                                        index,
-                                                        bypassChecking
-                                                    )
-                                                },
-                                                userContent = { index ->
-                                                    var isShowDialog by remember {
-                                                        mutableStateOf(
-                                                            false
-                                                        )
-                                                    }
-                                                    val bitmapIndex by remember(index) {
-                                                        derivedStateOf {
-                                                            bitmapIndexList.indexOf(
-                                                                index
+                                                                    }
+                                                                this.signByClick(
+                                                                    resolution.validate
+                                                                )
+                                                                return@runCatching ChaoxingSignResult(
+                                                                    isCaptchaSigning = true,
+                                                                    isCaptchaResolvedByModel = resolution.resolvedByModel
+                                                                )
+                                                            } else return@runCatching ChaoxingSignResult(
+                                                                isCaptchaSigning = false,
+                                                                isCaptchaResolvedByModel = false
                                                             )
                                                         }
                                                     }
-                                                    bitmapIndex.let {
-                                                        if (it != -1 && bitmapList.size > it) {
-                                                            IconButton(onClick = {
-                                                                hapticFeedback.performHapticFeedback(
-                                                                    HapticFeedbackType.ContextClick
-                                                                )
-                                                                isShowDialog = true
-                                                            }) {
-                                                                Icon(
-                                                                    painterResource(R.drawable.ic_image),
-                                                                    null
-                                                                )
-                                                            }
-                                                            if (isShowDialog) SnackbarAlertDialog(
-                                                                onDismissRequest = {
-                                                                    isShowDialog = false
-                                                                },
-                                                                confirmButton = {
-                                                                    Button(onClick = {
-                                                                        isShowDialog =
-                                                                            false
-                                                                    }) {
-                                                                        Text("关闭")
-                                                                    }
-                                                                },
-                                                                text = { _ ->
-                                                                    Image(
-                                                                        bitmapList[it].asImageBitmap(),
-                                                                        null,
-                                                                        modifier = Modifier
-                                                                            .fillMaxHeight(
-                                                                                0.5f
-                                                                            )
-                                                                            .padding(
-                                                                                4.dp,
-                                                                                0.dp
-                                                                            )
-                                                                    )
-                                                                })
-                                                        }
-                                                    }
-                                                }) { isSelf, otherUserSessionList, indexList ->
-                                                isSelfForSign = isSelf
-                                                isSigning.value = true
-                                                otherUserSessionForSignList.clear()
-                                                otherUserSessionForSignList.addAll(
-                                                    otherUserSessionList
-                                                )
-                                                bitmapIndexList = indexList
-                                                isCamera = true
                                             }
-                                        }
+                                        },
+                                        destination = destination,
+                                        onSigningFinished = { _, name, isOtherUser ->
+                                            coroutineScope.launch {
+                                                UMengHelper.onSignClickEvent(
+                                                    context,
+                                                    name,
+                                                    isOtherUser
+                                                )
+                                            }
+                                        },
+                                        onAllSigningFinished = { isSuccessful ->
+                                            isSigning.value = false
+                                            if (isSuccessful)
+                                                coroutineScope.launch {
+                                                    delay(ChaoxingSignHelper.TIMEOUT_SHOW_SPONSOR_AFTER_ALL_SIGNED)
+                                                    isSponsor = true
+                                                }
+                                        }, userSelections = userSelections,
+                                        signStatus = signStatus
+                                    )
+                                }
+                                OtherUserSelectorComponent(
+                                    navToOtherUser = {
+                                        navToOtherUserDestination()
+                                    },
+                                    signStatus,
+                                    isCurrentAlreadySigned = isForSelf,
+                                    userSelections = userSelections,
+                                    isSigning = isSigning,
+                                    prefixTipsContent = {
+                                        if (destination.isOldSignVersion)
+                                            OldSignVersionWarningTips()
+                                        if (signoffEntity != null)
+                                            SignOutRedirectTips(
+                                                signoffEntity!!
+                                            ) {
+                                                navToOtherSign(it)
+                                            }
+                                        if (destination.startTime != null)
+                                            SignPotentialWarningTips(
+                                                destination.startTime,
+                                                destination.endTime,
+                                                destination.isLate
+                                            )
+                                    },
+                                    isCloneSession = destination.isCloneSession,
+                                    onRetrySignAction = { index, session, bypassChecking ->
+                                        signHandler.retryOtherUserSigning(
+                                            session,
+                                            index,
+                                            bypassChecking,
+                                            hapticFeedback,
+                                            coroutineScope,
+                                            snackbarHost
+                                        )
+                                    }
+                                ) { isSelf, otherUserSessionList, _ ->
+                                    isSigning.value = true
+                                    signHandler.startSigning(
+                                        Unit,
+                                        isSelf,
+                                        otherUserSessionList,
+                                        hapticFeedback,
+                                        coroutineScope,
+                                        snackbarHost
+                                    )
+                                }
+                            }
+                        } else if (image == true) {
+                            var isSignForOther by remember { mutableStateOf<Boolean?>(null) }
+                            Crossfade(isSignForOther) { value ->
+                                when (value) {
+                                    null -> {
                                         Column(
                                             modifier = Modifier
-                                                .zIndex(1f)
-                                                .fillMaxSize(),
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            verticalArrangement = Arrangement.Center
+                                                .fillMaxSize()
+                                                .padding(16.dp),
+                                            verticalArrangement = Arrangement.Center,
+                                            horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
-                                            AnimatedVisibility(
-                                                isCamera, enter = slideInHorizontally(
-                                                    initialOffsetX = { it },
-                                                    animationSpec = tween(300)
-                                                ),
-                                                exit = slideOutHorizontally(
-                                                    animationSpec = tween(400),
-                                                    targetOffsetX = { (it * 1.5).toInt() }
-                                                )
-                                            ) {
-                                                BackHandler(isCamera) {
-                                                    isSigning.value = false
-                                                    isCamera = false
-                                                }
-                                                val combinedUserList by remember {
-                                                    derivedStateOf {
-                                                        if (isSelfForSign) {
-                                                            listOf(
-                                                                ChaoxingHttpClient.instance!!.userEntity.name,
-                                                            ) + otherUserSessionForSignList.filterNotNull()
-                                                                .map { it.name }
-                                                        } else {
-                                                            otherUserSessionForSignList.filterNotNull()
-                                                                .map { it.name }
-                                                        }
-                                                    }
-                                                }
-                                                var imageIndex by remember {
-                                                    mutableIntStateOf(
-                                                        0
-                                                    )
-                                                }
-                                                Column(
-                                                    modifier = Modifier
-                                                        .zIndex(1f)
-                                                        .fillMaxSize(),
-                                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                                    verticalArrangement = Arrangement.Center
-                                                ) {
-                                                    CameraComponent(
-                                                        pictureCount =
-                                                            combinedUserList.size,
-                                                        onNextPhoto = {
-                                                            imageIndex++
-                                                        },
-                                                        content = {
-                                                            Row(
-                                                                modifier = Modifier
-                                                                    .animateContentSize()
-                                                                    .background(
-                                                                        Color(0x88888888),
-                                                                        RoundedCornerShape(
-                                                                            14.dp
-                                                                        )
-                                                                    )
-                                                                    .border(
-                                                                        BorderStroke(
-                                                                            2.dp,
-                                                                            Color(
-                                                                                0xFF444444
-                                                                            )
-                                                                        ),
-                                                                        RoundedCornerShape(
-                                                                            14.dp
-                                                                        )
-                                                                    )
-                                                                    .padding(10.dp),
-                                                                verticalAlignment = Alignment.CenterVertically,
-                                                                horizontalArrangement = Arrangement.Center
-                                                            ) {
-                                                                Text("拍摄给 ${combinedUserList[imageIndex]} 签到的图片")
-                                                            }
-                                                        }) { imageList ->
-                                                        isCamera = false
-                                                        signHandler.startSigning(
-                                                            imageList,
-                                                            isSelfForSign,
-                                                            otherUserSessionForSignList,
-                                                            hapticFeedback,
-                                                            coroutineScope,
-                                                            snackbarHost
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                false -> {
-                                    BackHandler(isSignForOther == false) {
-                                        isSignForOther = null
-                                    }
-                                    val isNeedPermission =
-                                        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
-                                    val permissionState = if (isNeedPermission) {
-                                        rememberMultiplePermissionsState(listOf(android.Manifest.permission.READ_EXTERNAL_STORAGE))
-                                    } else null
-
-                                    if (isNeedPermission && permissionState?.allPermissionsGranted != true) {
-                                        Column(
-                                            modifier = Modifier.fillMaxSize(),
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            verticalArrangement = Arrangement.Center
-                                        ) {
-                                            Text("请授予应用读取图片权限")
-                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Icon(painterResource(R.drawable.ic_image_up), null)
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            Text("这是一个图片签到")
+                                            Spacer(modifier = Modifier.height(6.dp))
                                             Button(
                                                 onClick = {
                                                     hapticFeedback.performHapticFeedback(
                                                         HapticFeedbackType.ContextClick
                                                     )
-                                                    permissionState?.launchMultiplePermissionRequest()
+                                                    isSignForOther = false
                                                 },
-                                                modifier = Modifier.align(Alignment.CenterHorizontally)
-                                            ) {
-                                                Text("授予")
-                                            }
+                                                enabled = isForSelf.not(),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) { Text("为自己签到（从图库读取图片）") }
+                                            Button(
+                                                onClick = {
+                                                    hapticFeedback.performHapticFeedback(
+                                                        HapticFeedbackType.ContextClick
+                                                    )
+                                                    isSignForOther = true
+                                                }, modifier = Modifier.fillMaxWidth()
+                                            ) { Text("为多人签到（拍摄或从图库读取多张图片）") }
                                         }
-                                    } else {
-                                        if (isShowPhotoPicker) ChaoxingCloudDriveHelper.GetPhotoFromMediaStore { uri ->
-                                            if (uri == null) {
-                                                return@GetPhotoFromMediaStore
+                                    }
+
+                                    true -> {
+                                        val userSelections =
+                                            remember { mutableStateListOf(isForSelf.not()) }
+                                        val signStatus =
+                                            remember {
+                                                mutableListOf(
+                                                    ChaoxingSignStatus(
+                                                        hapticFeedback
+                                                    )
+                                                )
                                             }
-                                            coroutineScope.launch {
-                                                runCatching {
-                                                    val currentHttpClient =
-                                                        ChaoxingHttpClient.instance!!
-                                                    ChaoxingCloudDriveHelper.uploadImage(
-                                                        currentHttpClient,
-                                                        context,
-                                                        uri
-                                                    ).let { objectId ->
-                                                        if (signer.signByImage(objectId)) {
-                                                            captchaValidateParams =
-                                                                signer to { validateValue ->
-                                                                    validateValue.onSuccess {
-                                                                        signer.signByImageWithCaptcha(
-                                                                            objectId,
-                                                                            validateValue.getOrThrow()
-                                                                        )
-                                                                        coroutineScope.launch {
-                                                                            ChaoxingRecommendHelper.recordRecommendEvent(
-                                                                                context,
-                                                                                destination.classId,
-                                                                                destination.courseId,
-                                                                                ChaoxingHttpClient.instance!!
-                                                                            )
-                                                                        }
-                                                                        isSignSuccess = true
-                                                                        hapticFeedback.performHapticFeedback(
-                                                                            HapticFeedbackType.Confirm
-                                                                        )
-                                                                    }.onFailure {
-                                                                        it.snackbarReport(
-                                                                            snackbarHost,
-                                                                            coroutineScope,
-                                                                            "验证码校验错误",
-                                                                            hapticFeedback
-                                                                        )
+                                        var isCamera by remember { mutableStateOf(false) }
+                                        val isSigning = remember { mutableStateOf(false) }
+                                        var isSelfForSign by remember { mutableStateOf(false) }
+                                        var bitmapList by remember {
+                                            mutableStateOf<List<Bitmap>>(
+                                                emptyList()
+                                            )
+                                        }
+                                        val otherUserSessionForSignList =
+                                            remember {
+                                                mutableStateListOf<ChaoxingOtherUserSession?>()
+                                            }
+                                        var bitmapIndexList by remember {
+                                            mutableStateOf<List<Int>>(
+                                                emptyList()
+                                            )
+                                        }
+
+                                        val signHandler = remember {
+                                            ChaoxingSignHandler<List<Bitmap>>(
+                                                context = context,
+                                                onSelfSigning = { value ->
+                                                    runCatching {
+                                                        ChaoxingCloudDriveHelper.uploadImage(
+                                                            ChaoxingHttpClient.instance!!,
+                                                            randomizeStylizeImage(value[0])
+                                                        ).let { objectId ->
+                                                            if (signer.signByImage(objectId)) {
+                                                                val resolution =
+                                                                    suspendCancellableCoroutine { continuation ->
+                                                                        captchaValidateParams =
+                                                                            signer to { captchaResult ->
+                                                                                if (continuation.isActive)
+                                                                                    continuation.resumeWith(
+                                                                                        captchaResult
+                                                                                    )
+                                                                            }
                                                                     }
-                                                                }
-                                                        } else isSignSuccess = true
+                                                                signer.signByImage(
+                                                                    objectId,
+                                                                    resolution.validate
+                                                                )
+                                                                return@runCatching ChaoxingSignResult(
+                                                                    isCaptchaSigning = true,
+                                                                    isCaptchaResolvedByModel = resolution.resolvedByModel
+                                                                )
+                                                            } else return@runCatching ChaoxingSignResult(
+                                                                isCaptchaSigning = false,
+                                                                isCaptchaResolvedByModel = false
+                                                            )
+                                                        }
+                                                    }
+                                                },
+                                                onOtherUserSigning = { value, session, bypassChecking, index ->
+                                                    runCatching {
+                                                        ChaoxingHttpRequesterPool.getRequester(
+                                                            context,
+                                                            session.phoneNumber
+                                                        ).let { client ->
+                                                            ChaoxingPhotoSigner(
+                                                                client,
+                                                                if (isAlwaysForceSign || bypassChecking || (destination.isOldSignVersion && destination.courseId > 0L)) destination.copy(
+                                                                    classId = ChaoxingCourseHelper.getClassIdFromCourseId(
+                                                                        client,
+                                                                        destination.courseId
+                                                                    ).getOrNull()
+                                                                        ?: destination.classId
+                                                                ) else destination,
+                                                                signer.getSignInfo()
+                                                            ).run {
+                                                                if (!(isAlwaysForceSign || bypassChecking)) checkSignStatusThrowException(
+                                                                    context
+                                                                )
+                                                                val objectId =
+                                                                    ChaoxingCloudDriveHelper.uploadImage(
+                                                                        client,
+                                                                        randomizeStylizeImage(
+                                                                            value[bitmapIndexList.indexOf(
+                                                                                index + 1
+                                                                            )]
+                                                                        )
+                                                                    )
+                                                                if (signByImage(objectId)) {
+                                                                    val resolution =
+                                                                        suspendCancellableCoroutine { continuation ->
+                                                                            captchaValidateParams =
+                                                                                this to { captchaResult ->
+                                                                                    if (continuation.isActive) {
+                                                                                        continuation.resumeWith(
+                                                                                            captchaResult
+                                                                                        )
+                                                                                    }
+                                                                                }
+                                                                        }
+                                                                    this.signByImage(
+                                                                        objectId,
+                                                                        resolution.validate
+                                                                    )
+                                                                    return@runCatching ChaoxingSignResult(
+                                                                        isCaptchaSigning = true,
+                                                                        isCaptchaResolvedByModel = resolution.resolvedByModel
+                                                                    )
+                                                                } else return@runCatching ChaoxingSignResult(
+                                                                    isCaptchaSigning = false,
+                                                                    isCaptchaResolvedByModel = false
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                onSigningFinished = { _, name, isOtherUser ->
+                                                    coroutineScope.launch {
                                                         UMengHelper.onSignPhotoEvent(
                                                             context,
-                                                            ChaoxingHttpClient.instance!!.userEntity.name
+                                                            name,
+                                                            isOtherUser
                                                         )
                                                     }
-                                                }.onFailure {
-                                                    it.snackbarReport(
-                                                        snackbarHost,
-                                                        coroutineScope,
-                                                        "签到失败", hapticFeedback
+
+                                                },
+                                                onAllSigningFinished = { isSuccessful ->
+                                                    isSigning.value = false
+                                                    if (isSuccessful) {
+                                                        coroutineScope.launch {
+                                                            delay(ChaoxingSignHelper.TIMEOUT_SHOW_SPONSOR_AFTER_ALL_SIGNED)
+                                                            isSponsor = true
+                                                        }
+                                                    }
+                                                },
+                                                destination = destination,
+                                                userSelections = userSelections,
+                                                signStatus = signStatus
+                                            )
+                                        }
+                                        BackHandler(isSignForOther == true && !isCamera) {
+                                            isSignForOther = null
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .zIndex(0f)
+                                                .fillMaxSize()
+                                        ) {
+                                            Column(
+                                                modifier = Modifier.padding(8.dp, 4.dp, 8.dp, 0.dp)
+                                            ) {
+                                                OtherUserSelectorComponent(
+                                                    navToOtherUser = {
+                                                        navToOtherUserDestination()
+                                                    },
+                                                    signStatus,
+                                                    isCloneSession = destination.isCloneSession,
+                                                    isCurrentAlreadySigned = isForSelf,
+                                                    userSelections = userSelections,
+                                                    isSigning = isSigning,
+                                                    prefixTipsContent = {
+                                                        if (destination.isOldSignVersion)
+                                                            OldSignVersionWarningTips()
+                                                        if (signoffEntity != null)
+                                                            SignOutRedirectTips(
+                                                                signoffEntity!!
+                                                            ) {
+                                                                navToOtherSign(it)
+                                                            }
+                                                        if (destination.startTime != null)
+                                                            SignPotentialWarningTips(
+                                                                destination.startTime,
+                                                                destination.endTime,
+                                                                destination.isLate
+                                                            )
+                                                    },
+                                                    onRetrySignAction = { index, session, bypassChecking ->
+                                                        signHandler.retryOtherUserSigning(
+                                                            session,
+                                                            index,
+                                                            bypassChecking,
+                                                            hapticFeedback,
+                                                            coroutineScope,
+                                                            snackbarHost
+                                                        )
+                                                    },
+                                                    userContent = { index ->
+                                                        var isShowDialog by remember {
+                                                            mutableStateOf(
+                                                                false
+                                                            )
+                                                        }
+                                                        val bitmapIndex by remember(index) {
+                                                            derivedStateOf {
+                                                                bitmapIndexList.indexOf(
+                                                                    index
+                                                                )
+                                                            }
+                                                        }
+                                                        bitmapIndex.let {
+                                                            if (it != -1 && bitmapList.size > it) {
+                                                                IconButton(onClick = {
+                                                                    hapticFeedback.performHapticFeedback(
+                                                                        HapticFeedbackType.ContextClick
+                                                                    )
+                                                                    isShowDialog = true
+                                                                }) {
+                                                                    Icon(
+                                                                        painterResource(R.drawable.ic_image),
+                                                                        null
+                                                                    )
+                                                                }
+                                                                if (isShowDialog) SnackbarAlertDialog(
+                                                                    onDismissRequest = {
+                                                                        isShowDialog = false
+                                                                    },
+                                                                    confirmButton = {
+                                                                        Button(onClick = {
+                                                                            hapticFeedback.performHapticFeedback(
+                                                                                HapticFeedbackType.ContextClick
+                                                                            )
+                                                                            isShowDialog =
+                                                                                false
+                                                                        }) {
+                                                                            Text("关闭")
+                                                                        }
+                                                                    },
+                                                                    text = { _ ->
+                                                                        Image(
+                                                                            bitmapList[it].asImageBitmap(),
+                                                                            null,
+                                                                            modifier = Modifier
+                                                                                .fillMaxHeight(
+                                                                                    0.5f
+                                                                                )
+                                                                                .padding(
+                                                                                    4.dp,
+                                                                                    0.dp
+                                                                                )
+                                                                        )
+                                                                    })
+                                                            }
+                                                        }
+                                                    }) { isSelf, otherUserSessionList, indexList ->
+                                                    isSelfForSign = isSelf
+                                                    isSigning.value = true
+                                                    otherUserSessionForSignList.clear()
+                                                    otherUserSessionForSignList.addAll(
+                                                        otherUserSessionList
                                                     )
+                                                    bitmapIndexList = indexList
+                                                    isCamera = true
                                                 }
-                                                isShowPhotoPicker = false
+                                            }
+                                            Column(
+                                                modifier = Modifier
+                                                    .zIndex(1f)
+                                                    .fillMaxSize(),
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.Center
+                                            ) {
+                                                AnimatedVisibility(
+                                                    isCamera, enter = slideInHorizontally(
+                                                        initialOffsetX = { it },
+                                                        animationSpec = tween(300)
+                                                    ),
+                                                    exit = slideOutHorizontally(
+                                                        animationSpec = tween(400),
+                                                        targetOffsetX = { (it * 1.5).toInt() }
+                                                    )
+                                                ) {
+                                                    BackHandler(isCamera) {
+                                                        isSigning.value = false
+                                                        isCamera = false
+                                                    }
+                                                    val combinedUserList by remember {
+                                                        derivedStateOf {
+                                                            if (isSelfForSign) {
+                                                                listOf(
+                                                                    ChaoxingHttpClient.instance!!.name,
+                                                                ) + otherUserSessionForSignList.filterNotNull()
+                                                                    .map { it.name }
+                                                            } else {
+                                                                otherUserSessionForSignList.filterNotNull()
+                                                                    .map { it.name }
+                                                            }
+                                                        }
+                                                    }
+                                                    var imageIndex by remember {
+                                                        mutableIntStateOf(
+                                                            0
+                                                        )
+                                                    }
+                                                    Column(
+                                                        modifier = Modifier
+                                                            .zIndex(1f)
+                                                            .fillMaxSize(),
+                                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                                        verticalArrangement = Arrangement.Center
+                                                    ) {
+                                                        CameraComponent(
+                                                            pictureCount =
+                                                                combinedUserList.size,
+                                                            onNextPhoto = {
+                                                                imageIndex++
+                                                            },
+                                                            content = {
+                                                                Row(
+                                                                    modifier = Modifier
+                                                                        .animateContentSize()
+                                                                        .background(
+                                                                            Color(0x88888888),
+                                                                            RoundedCornerShape(
+                                                                                14.dp
+                                                                            )
+                                                                        )
+                                                                        .border(
+                                                                            BorderStroke(
+                                                                                2.dp,
+                                                                                Color(
+                                                                                    0xFF444444
+                                                                                )
+                                                                            ),
+                                                                            RoundedCornerShape(
+                                                                                14.dp
+                                                                            )
+                                                                        )
+                                                                        .padding(10.dp),
+                                                                    verticalAlignment = Alignment.CenterVertically,
+                                                                    horizontalArrangement = Arrangement.Center
+                                                                ) {
+                                                                    Text("拍摄给 ${combinedUserList[imageIndex]} 签到的图片")
+                                                                }
+                                                            }) { imageList ->
+                                                            isCamera = false
+                                                            signHandler.startSigning(
+                                                                imageList,
+                                                                isSelfForSign,
+                                                                otherUserSessionForSignList,
+                                                                hapticFeedback,
+                                                                coroutineScope,
+                                                                snackbarHost
+                                                            )
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
-                                        Crossfade(isSignSuccess) { v ->
-                                            if (v) {
-                                                Column(
-                                                    modifier = Modifier.fillMaxSize(),
-                                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                                    verticalArrangement = Arrangement.Center
-                                                ) {
-                                                    Icon(
-                                                        painterResource(R.drawable.ic_check_px80),
-                                                        ""
-                                                    )
-                                                    Text("签到成功")
-                                                    Button(onClick = {
-                                                        navBack()
-                                                    }) { Text("返回") }
-                                                }
-                                            } else {
-                                                Column(
-                                                    modifier = Modifier.fillMaxSize(),
-                                                    verticalArrangement = Arrangement.Center,
-                                                    horizontalAlignment = Alignment.CenterHorizontally
-                                                ) {
-                                                    if (signoffEntity != null)
-                                                        SignOutRedirectTips(
-                                                            signoffEntity!!
-                                                        ) {
-                                                            navToOtherSign(it)
-                                                        }
-                                                    Button(onClick = {
+                                    }
+
+                                    false -> {
+                                        BackHandler(isSignForOther == false) {
+                                            isSignForOther = null
+                                        }
+                                        val isNeedPermission =
+                                            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+                                        val permissionState = if (isNeedPermission) {
+                                            rememberMultiplePermissionsState(listOf(android.Manifest.permission.READ_EXTERNAL_STORAGE))
+                                        } else null
+
+                                        if (isNeedPermission && permissionState?.allPermissionsGranted != true) {
+                                            Column(
+                                                modifier = Modifier.fillMaxSize(),
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.Center
+                                            ) {
+                                                Text("请授予应用读取图片权限")
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Button(
+                                                    onClick = {
                                                         hapticFeedback.performHapticFeedback(
                                                             HapticFeedbackType.ContextClick
                                                         )
-                                                        isShowPhotoPicker = true
-                                                    }) {
-                                                        Text("选择图片")
+                                                        permissionState?.launchMultiplePermissionRequest()
+                                                    },
+                                                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                                                ) {
+                                                    Text("授予")
+                                                }
+                                            }
+                                        } else {
+                                            if (isShowPhotoPicker) ChaoxingCloudDriveHelper.GetPhotoFromMediaStore { uri ->
+                                                if (uri == null) {
+                                                    return@GetPhotoFromMediaStore
+                                                }
+                                                coroutineScope.launch {
+                                                    runCatching {
+                                                        val currentHttpClient =
+                                                            ChaoxingHttpClient.instance!!
+                                                        val bitmap =
+                                                            withContext(Dispatchers.IO) {
+                                                                context.contentResolver.decodePhotoBitmap(
+                                                                    uri
+                                                                )
+                                                            }
+                                                                ?: throw ChaoxingPhotoSigner.ChaoxingPhotoSignException(
+                                                                    "无法读取照片"
+                                                                )
+                                                        randomizeStylizeImage(bitmap).also {
+                                                            bitmap.recycle()
+                                                        }.let { stylized ->
+                                                            ChaoxingCloudDriveHelper.uploadImage(
+                                                                currentHttpClient,
+                                                                stylized
+                                                            ).also { stylized.recycle() }
+                                                        }.let { objectId ->
+                                                            if (signer.signByImage(objectId)) {
+                                                                captchaValidateParams =
+                                                                    signer to { captchaResult ->
+                                                                        captchaResult.onSuccess { resolution ->
+                                                                            signer.signByImage(
+                                                                                objectId,
+                                                                                resolution.validate
+                                                                            )
+                                                                            coroutineScope.launch {
+                                                                                ChaoxingRecommendHelper.recordRecommendEvent(
+                                                                                    context,
+                                                                                    destination.classId,
+                                                                                    destination.courseId,
+                                                                                    ChaoxingHttpClient.instance!!
+                                                                                )
+                                                                            }
+                                                                            isSignSuccess = true
+                                                                            hapticFeedback.performHapticFeedback(
+                                                                                HapticFeedbackType.Confirm
+                                                                            )
+                                                                        }.onFailure {
+                                                                            it.snackbarReport(
+                                                                                snackbarHost,
+                                                                                coroutineScope,
+                                                                                "验证码校验错误",
+                                                                                hapticFeedback
+                                                                            )
+                                                                        }
+                                                                    }
+                                                            } else isSignSuccess = true
+                                                            UMengHelper.onSignPhotoEvent(
+                                                                context,
+                                                                ChaoxingHttpClient.instance!!.name
+                                                            )
+                                                        }
+                                                    }.onFailure {
+                                                        it.snackbarReport(
+                                                            snackbarHost,
+                                                            coroutineScope,
+                                                            "签到失败", hapticFeedback
+                                                        )
+                                                    }
+                                                    isShowPhotoPicker = false
+                                                }
+                                            }
+                                            Crossfade(isSignSuccess) { v ->
+                                                if (v) {
+                                                    Column(
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                                        verticalArrangement = Arrangement.Center
+                                                    ) {
+                                                        Icon(
+                                                            painterResource(R.drawable.ic_check_px80),
+                                                            ""
+                                                        )
+                                                        Text("签到成功")
+                                                        Button(onClick = {
+                                                            navBack()
+                                                        }) { Text("返回") }
+                                                    }
+                                                } else {
+                                                    Column(
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        verticalArrangement = Arrangement.Center,
+                                                        horizontalAlignment = Alignment.CenterHorizontally
+                                                    ) {
+                                                        if (signoffEntity != null)
+                                                            SignOutRedirectTips(
+                                                                signoffEntity!!
+                                                            ) {
+                                                                navToOtherSign(it)
+                                                            }
+                                                        Button(onClick = {
+                                                            hapticFeedback.performHapticFeedback(
+                                                                HapticFeedbackType.ContextClick
+                                                            )
+                                                            isShowPhotoPicker = true
+                                                        }) {
+                                                            Text("选择图片")
+                                                        }
                                                     }
                                                 }
                                             }
@@ -836,6 +930,8 @@ fun PhotoSignScreen(
                                     }
                                 }
                             }
+                        } else {
+                            CenterCircularProgressIndicator()
                         }
                     }
                 } else if (c != null) {

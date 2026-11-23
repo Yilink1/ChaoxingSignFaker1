@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2025-2026, @aquamarine5 (@海蓝色的咕咕鸽). All Rights Reserved.
  * Author: aquamarine5@163.com (Github: https://github.com/aquamarine5) and Brainspark (previously RenegadeCreation)
  * Repository: https://github.com/aquamarine5/ChaoxingSignFaker
@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -39,11 +40,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -52,35 +57,46 @@ import com.github.ihsg.patternlocker.DefaultLockerNormalCellView
 import com.github.ihsg.patternlocker.OnPatternChangeListener
 import com.github.ihsg.patternlocker.PatternLockerView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.Serializable
 import org.aquamarine5.brainspark.chaoxingsignfaker.R
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingCourseHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClientPool
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpRequesterPool
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingSignHelper
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.SignDestination
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CaptchaHandlerDialog
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CaptchaHandlerParams
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CenterCircularProgressIndicator
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.CommonCardTip
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.GetLocationComponent
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.NetworkExceptionComponent
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.NewFeatureTipsCard
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.NotReadyToSignNoticeComponent
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.OldSignVersionWarningTips
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.OtherUserSelectorComponent
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.SignOutRedirectTips
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.SignPotentialWarningTips
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.SponsorPopupDialog
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.cloneSessionGuard
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.httpClientGuard
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.toChaoxingLocationSignEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingLocationSignEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignActivityEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignActivityStatus
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignOutEntity
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignResult
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignStatus
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.SignDestination
 import org.aquamarine5.brainspark.chaoxingsignfaker.signer.ChaoxingGestureSigner
 import org.aquamarine5.brainspark.chaoxingsignfaker.signer.ChaoxingSignHandler
+import org.aquamarine5.brainspark.chaoxingsignfaker.signer.ChaoxingSigner
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.LocalSnackbarHostState
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.UMengHelper
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.chaoxingDataStore
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.displaySnackbar
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.saveSelectedLocation
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.snackbarReport
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -89,12 +105,14 @@ import kotlin.time.Duration.Companion.milliseconds
 data class GestureSignDestination(
     override val activeId: Long,
     override val classId: Int,
-    override val courseId: Int,
+    override val courseId: Long,
     val extContent: String,
     val startTime: Long?,
     override val endTime: Long?,
     val isLate: Boolean,
-    override val isCloneSession: Boolean
+    override val isCloneSession: Boolean,
+    override val isOldSignVersion: Boolean = false,
+    override val chatId: Long? = null
 ) : SignDestination {
     companion object {
         fun parseFromSignActivityEntity(
@@ -124,11 +142,18 @@ fun GestureSignScreen(
     navToOtherSign: (SignDestination) -> Unit,
     navToOtherUserDestination: () -> Unit
 ) {
+    if (!cloneSessionGuard(
+            destination.isCloneSession,
+            onCloneInvalid = navToCourseDetailDestination
+        )
+    ) return
+    val client = httpClientGuard(onNavigateBack = navToCourseDetailDestination) ?: return
     var signActivityStatus by remember { mutableStateOf<ChaoxingSignActivityStatus?>(null) }
+    var isWeChatSignForbidden by remember { mutableStateOf(false) }
     var isSignForOther by remember { mutableStateOf(false) }
-    val signer = remember {
+    val signer = remember(client) {
         ChaoxingGestureSigner(
-            ChaoxingHttpClient.instance!!,
+            client,
             destination
         )
     }
@@ -164,13 +189,17 @@ fun GestureSignScreen(
                         client,
                         destination
                     ).let {
-                        signActivityStatus = it.preSign()
+                        isWeChatSignForbidden =
+                            it.getSignInfo().getInteger("openCheckWeChatFlag") == 1
+                        signActivityStatus = it.preSign(context)
                         isMapRequired = it.isPositionRequired()
                         it.getGestureSignInfo()
                     }
                 }
             } else {
-                signActivityStatus = signer.preSign()
+                isWeChatSignForbidden =
+                    signer.getSignInfo().getInteger("openCheckWeChatFlag") == 1
+                signActivityStatus = signer.preSign(context)
                 isMapRequired = signer.isPositionRequired()
                 signer.getGestureSignInfo()
             }
@@ -191,9 +220,26 @@ fun GestureSignScreen(
             NetworkExceptionComponent(v.exceptionOrNull()!!) {
                 coroutineScope.launch {
                     isFetchedFailure = runCatching {
-                        signoffData = signer.getGestureSignInfo()
-                        isMapRequired = signer.isPositionRequired()
-                        signActivityStatus = signer.preSign()
+                        signoffData = if (destination.isCloneSession) {
+                            ChaoxingHttpClient.cloneInstance!!.let { client ->
+                                ChaoxingGestureSigner(
+                                    client,
+                                    destination
+                                ).let {
+                                    isWeChatSignForbidden =
+                                        it.getSignInfo().getInteger("openCheckWeChatFlag") == 1
+                                    signActivityStatus = it.preSign(context)
+                                    isMapRequired = it.isPositionRequired()
+                                    it.getGestureSignInfo()
+                                }
+                            }
+                        } else {
+                            isWeChatSignForbidden =
+                                signer.getSignInfo().getInteger("openCheckWeChatFlag") == 1
+                            signActivityStatus = signer.preSign(context)
+                            isMapRequired = signer.isPositionRequired()
+                            signer.getGestureSignInfo()
+                        }
                     }.onFailure {
                         it.snackbarReport(
                             snackbarHost,
@@ -229,7 +275,19 @@ fun GestureSignScreen(
                 } else if (c == ChaoxingSignActivityStatus.READY_TO_SIGN) {
                     var isCheckingStatus by remember { mutableStateOf(false) }
                     var text by remember { mutableStateOf("") }
+                    val isDisplayAutoFetchGestureTips = remember { mutableStateOf(false) }
                     var locationData by remember { mutableStateOf<ChaoxingLocationSignEntity?>(null) }
+                    LaunchedEffect(Unit) {
+                        context.chaoxingDataStore.data.first().let { data ->
+                            isDisplayAutoFetchGestureTips.value =
+                                !data.learntTooltips.fetchGestureSignCodeDirectly
+                            if (data.containsClassSelectedLocation(destination.classId)) {
+                                locationData = data.getClassSelectedLocationOrThrow(
+                                    destination.classId
+                                ).toChaoxingLocationSignEntity()
+                            }
+                        }
+                    }
                     var isMapGetting by remember { mutableStateOf(false) }
                     var pendingAutoSignAction by remember { mutableStateOf<(() -> Unit)?>(null) }
                     val signStatus = remember { mutableListOf(ChaoxingSignStatus(hapticFeedback)) }
@@ -266,6 +324,62 @@ fun GestureSignScreen(
                                 fontSize = 16.sp,
                                 modifier = Modifier.padding(0.dp, 6.dp)
                             )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            if (isWeChatSignForbidden) {
+                                CommonCardTip(
+                                    icon = R.drawable.ic_face_slightly_frowning,
+                                    containerColor = Color.DarkGray,
+                                    text = "新版本中获取手势签到图案的方法依赖于微信客户端，由于老师在发布签到时禁止了通过微信进行签到，故此签到仍然无法破解获取手势码。"
+                                )
+                            } else {
+                                NewFeatureTipsCard(
+                                    isDisplayAutoFetchGestureTips,
+                                    tipsText = "在新版本中，我们破解了手势签到的签到图案，现在支持一键获取手势图案了！",
+                                    modifier = Modifier.padding(12.dp, 0.dp)
+                                ) {
+                                    context.chaoxingDataStore.updateData {
+                                        it.toBuilder().setLearntTooltips(
+                                            it.learntTooltips.toBuilder()
+                                                .setFetchGestureSignCodeDirectly(true)
+                                                .build()
+                                        ).build()
+                                    }
+                                }
+                            }
+                            if (destination.isOldSignVersion) {
+                                CommonCardTip(
+                                    icon = R.drawable.ic_face_slightly_smiling,
+                                    containerColor = Color.DarkGray,
+                                    text = {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                buildAnnotatedString {
+                                                    append("对于学习通的部分老版本签到，可以不绘制手势，点击")
+                                                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                                                        append("绕过")
+                                                    }
+                                                    append("按钮以直接进行签到")
+                                                },
+                                                color = Color.White,
+                                                fontSize = 13.sp,
+                                                lineHeight = 18.sp,
+                                                fontWeight = FontWeight.W500,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Button(onClick = {
+                                                text = ""
+                                                isCheckingStatus = true
+                                            }) {
+                                                Text("绕过")
+                                            }
+                                        }
+                                    }
+                                )
+                            }
                             Spacer(modifier = Modifier.height(6.dp))
                             Column(
                                 modifier = Modifier
@@ -358,6 +472,33 @@ fun GestureSignScreen(
                                 ) { view ->
                                     view.requestLayout()
                                 }
+                                if (!isWeChatSignForbidden) {
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Button(onClick = {
+                                        coroutineScope.launch {
+                                            runCatching {
+                                                text = signer.getGestureSignCode()
+                                                hapticFeedback.performHapticFeedback(
+                                                    HapticFeedbackType.Confirm
+                                                )
+                                                isCheckingStatus = true
+                                                snackbarHost.displaySnackbar(
+                                                    "手势图案获取成功",
+                                                    coroutineScope
+                                                )
+                                            }.onFailure {
+                                                it.snackbarReport(
+                                                    snackbarHost,
+                                                    coroutineScope,
+                                                    "获取手势图案失败",
+                                                    hapticFeedback
+                                                )
+                                            }
+                                        }
+                                    }) {
+                                        Text("自动获取手势图案")
+                                    }
+                                }
                             }
                         }
                     }
@@ -368,24 +509,42 @@ fun GestureSignScreen(
                             onSelfSigning = { value ->
                                 runCatching {
                                     if (signer.sign(value, locationData)) {
-                                        suspendCancellableCoroutine { continuation ->
-                                            captchaValidateParams = signer to { captchaValue ->
-                                                if (continuation.isActive)
-                                                    continuation.resumeWith(captchaValue.onSuccess {
-                                                        signer.signWithCaptcha(value, it, locationData)
-                                                    })
+                                        val resolution =
+                                            suspendCancellableCoroutine { continuation ->
+                                                captchaValidateParams =
+                                                    signer to { captchaResult ->
+                                                        if (continuation.isActive)
+                                                            continuation.resumeWith(captchaResult)
+                                                    }
                                             }
-                                        }
-                                        return@runCatching true
-                                    } else return@runCatching false
+                                        signer.sign(
+                                            value,
+                                            locationData,
+                                            resolution.validate
+                                        )
+                                        return@runCatching ChaoxingSignResult(
+                                            isCaptchaSigning = true,
+                                            isCaptchaResolvedByModel = resolution.resolvedByModel
+                                        )
+                                    } else return@runCatching ChaoxingSignResult(
+                                        isCaptchaSigning = false,
+                                        isCaptchaResolvedByModel = false
+                                    )
+                                }.onFailure {
+                                    if (it is ChaoxingSigner.WrongPositionException &&
+                                        it.isAlreadyDisabledRandomizedLocation
+                                    ) locationData = null
                                 }
                             }, onOtherUserSigning = { value, session, bypassChecking, _ ->
                                 runCatching {
-                                    ChaoxingHttpClientPool.get(context, session.phoneNumber)
+                                    ChaoxingHttpRequesterPool.getRequester(
+                                        context,
+                                        session.phoneNumber
+                                    )
                                         .let { client ->
                                             ChaoxingGestureSigner(
                                                 client,
-                                                if (isAlwaysForceSign || bypassChecking) destination.copy(
+                                                if (isAlwaysForceSign || bypassChecking || (destination.isOldSignVersion && destination.courseId > 0L)) destination.copy(
                                                     classId = ChaoxingCourseHelper.getClassIdFromCourseId(
                                                         client,
                                                         destination.courseId
@@ -393,34 +552,50 @@ fun GestureSignScreen(
                                                 ) else destination,
                                                 signer.getSignInfo()
                                             ).run {
-                                                if (!(isAlwaysForceSign || bypassChecking)) checkSignStatusThrowException()
+                                                if (!(isAlwaysForceSign || bypassChecking)) checkSignStatusThrowException(
+                                                    context
+                                                )
                                                 if (sign(value, locationData)) {
-                                                    suspendCancellableCoroutine { continuation ->
-                                                        captchaValidateParams =
-                                                            this to { captchaValidate ->
-                                                                if (continuation.isActive) {
-                                                                    continuation.resumeWith(
-                                                                        runCatching {
-                                                                            captchaValidate.onSuccess {
-                                                                                signWithCaptcha(
-                                                                                    value,
-                                                                                    it,
-                                                                                    locationData
-                                                                                )
-                                                                            }.getOrThrow()
-                                                                        })
+                                                    val resolution =
+                                                        suspendCancellableCoroutine { continuation ->
+                                                            captchaValidateParams =
+                                                                this to { captchaResult ->
+                                                                    if (continuation.isActive) {
+                                                                        continuation.resumeWith(
+                                                                            captchaResult
+                                                                        )
+                                                                    }
                                                                 }
-                                                            }
-                                                    }
-                                                    return@runCatching true
-                                                } else return@runCatching false
+                                                        }
+                                                    sign(
+                                                        value,
+                                                        locationData,
+                                                        resolution.validate
+                                                    )
+                                                    return@runCatching ChaoxingSignResult(
+                                                        isCaptchaSigning = true,
+                                                        isCaptchaResolvedByModel = resolution.resolvedByModel
+                                                    )
+                                                } else return@runCatching ChaoxingSignResult(
+                                                    isCaptchaSigning = false,
+                                                    isCaptchaResolvedByModel = false
+                                                )
                                             }
                                         }
+                                }.onFailure {
+                                    if (it is ChaoxingSigner.WrongPositionException &&
+                                        it.isAlreadyDisabledRandomizedLocation
+                                    ) locationData = null
                                 }
                             },
                             onSigningFinished = { _, name, isOtherUser ->
                                 coroutineScope.launch {
                                     UMengHelper.onSignGestureEvent(context, name, isOtherUser)
+                                }
+                                locationData?.saveSelectedLocation(
+                                    context, destination.classId, coroutineScope
+                                ) {
+                                    locationData = it
                                 }
                             }, onAllSigningFinished = { isSuccessful ->
                                 isSigning.value = false
@@ -438,122 +613,137 @@ fun GestureSignScreen(
                             .fillMaxSize()
                             .zIndex(0f)
                     ) {
-                    Column(modifier = Modifier.padding(8.dp, 4.dp, 8.dp, 0.dp)) {
-                        OtherUserSelectorComponent(
-                            navToOtherUser = { navToOtherUserDestination() },
-                            signStatus = signStatus,
-                            isCurrentAlreadySigned = isSignForOther,
-                            userSelections = userSelections,
-                            isCloneSession = destination.isCloneSession,
-                            isSigning = isSigning,
-                            prefixTipsContent = {
-                                if (signoffData != null)
-                                    SignOutRedirectTips(
-                                        signoffData!!
-                                    ) {
-                                        navToOtherSign(it)
-                                    }
-                                if (destination.startTime != null)
-                                    SignPotentialWarningTips(
-                                        destination.startTime,
-                                        destination.endTime,
-                                        destination.isLate
-                                    )
-                                if (isMapRequired) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.padding(0.dp, 6.dp)
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                "签到位置：",
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Text(locationData?.address ?: "尚未选择位置")
+                        Column(modifier = Modifier.padding(8.dp, 4.dp, 8.dp, 0.dp)) {
+                            OtherUserSelectorComponent(
+                                navToOtherUser = { navToOtherUserDestination() },
+                                signStatus = signStatus,
+                                isCurrentAlreadySigned = isSignForOther,
+                                userSelections = userSelections,
+                                isCloneSession = destination.isCloneSession,
+                                isSigning = isSigning,
+                                prefixTipsContent = {
+                                    if (destination.isOldSignVersion)
+                                        OldSignVersionWarningTips()
+                                    if (signoffData != null)
+                                        SignOutRedirectTips(
+                                            signoffData!!
+                                        ) {
+                                            navToOtherSign(it)
                                         }
-                                        Button(onClick = {
-                                            isMapGetting = true
-                                        }) {
-                                            Text(if (locationData == null) "选择位置" else "重新获取位置")
+                                    if (destination.startTime != null)
+                                        SignPotentialWarningTips(
+                                            destination.startTime,
+                                            destination.endTime,
+                                            destination.isLate
+                                        )
+                                    if (isMapRequired) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(0.dp, 6.dp)
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    "签到位置：",
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(locationData?.address ?: "尚未选择位置")
+                                            }
+                                            Button(onClick = {
+                                                isMapGetting = true
+                                            }) {
+                                                Text(if (locationData == null) "选择位置" else "重新获取位置")
+                                            }
                                         }
                                     }
-                                }
-                            }, onRetrySignAction = { index, session, bypassChecking ->
-                                signHandler.retryOtherUserSigning(session, index, bypassChecking)
-                            }
-                        ) { isSelf, otherUserSessionList, _ ->
-                            if (!isCheckingStatus) {
-                                coroutineScope.launch {
-                                    snackbarHost.currentSnackbarData?.dismiss()
-                                    snackbarHost.showSnackbar(
-                                        "请先输入正确的图案签到码",
-                                        withDismissAction = true
-                                    )
-                                }
-                                return@OtherUserSelectorComponent
-                            }
-                            if (isMapRequired && locationData == null) {
-                                pendingAutoSignAction = {
-                                    isSigning.value = true
-                                    signHandler.startSigning(
-                                        text,
-                                        isSelf,
-                                        otherUserSessionList,
+                                }, onRetrySignAction = { index, session, bypassChecking ->
+                                    signHandler.retryOtherUserSigning(
+                                        session,
+                                        index,
+                                        bypassChecking,
                                         hapticFeedback,
                                         coroutineScope,
                                         snackbarHost
-                                    )
+                                    ).onFailure {
+                                        if (it is ChaoxingSigner.WrongPositionException &&
+                                            it.isAlreadyDisabledRandomizedLocation
+                                        ) locationData = null
+                                    }
                                 }
-                                isMapGetting = true
-                                return@OtherUserSelectorComponent
+                            ) { isSelf, otherUserSessionList, _ ->
+                                if (!isCheckingStatus) {
+                                    coroutineScope.launch {
+                                        snackbarHost.currentSnackbarData?.dismiss()
+                                        snackbarHost.showSnackbar(
+                                            "请先输入正确的图案签到码",
+                                            withDismissAction = true
+                                        )
+                                    }
+                                    return@OtherUserSelectorComponent
+                                }
+                                if (isMapRequired && locationData == null) {
+                                    pendingAutoSignAction = {
+                                        isSigning.value = true
+                                        signHandler.startSigning(
+                                            text,
+                                            isSelf,
+                                            otherUserSessionList,
+                                            hapticFeedback,
+                                            coroutineScope,
+                                            snackbarHost
+                                        )
+                                    }
+                                    isMapGetting = true
+                                    return@OtherUserSelectorComponent
+                                }
+                                isSigning.value = true
+                                signHandler.startSigning(
+                                    text,
+                                    isSelf,
+                                    otherUserSessionList,
+                                    hapticFeedback,
+                                    coroutineScope,
+                                    snackbarHost
+                                )
                             }
-                            isSigning.value = true
-                            signHandler.startSigning(
-                                text,
-                                isSelf,
-                                otherUserSessionList,
-                                hapticFeedback,
-                                coroutineScope,
-                                snackbarHost
-                            )
                         }
-                    }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .zIndex(1f)
-                    ) {
-                        AnimatedVisibility(
-                            isMapGetting,
-                            enter =
-                                slideInHorizontally(
-                                    initialOffsetX = { it },
-                                    animationSpec = tween(300)
-                                ) + fadeIn(
-                                    animationSpec = tween(300)
-                                ),
-                            exit =
-                                slideOutHorizontally(
-                                    animationSpec = tween(300),
-                                    targetOffsetX = { it }) +
-                                        fadeOut(animationSpec = tween(300)),
-                            modifier = Modifier.zIndex(1f)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .zIndex(1f)
                         ) {
-                            GetLocationComponent(confirmButtonText = {
-                                Text("设置")
-                            }) {
-                                isMapGetting = false
-                                locationData = it
-                                pendingAutoSignAction?.invoke()
-                                pendingAutoSignAction = null
-                            }
-                            BackHandler(isMapGetting) {
-                                pendingAutoSignAction = null
-                                isSigning.value = false
-                                isMapGetting = false
+                            AnimatedVisibility(
+                                isMapGetting,
+                                enter =
+                                    slideInHorizontally(
+                                        initialOffsetX = { it },
+                                        animationSpec = tween(300)
+                                    ) + fadeIn(
+                                        animationSpec = tween(300)
+                                    ),
+                                exit =
+                                    slideOutHorizontally(
+                                        animationSpec = tween(300),
+                                        targetOffsetX = { it }) +
+                                            fadeOut(animationSpec = tween(300)),
+                                modifier = Modifier.zIndex(1f)
+                            ) {
+                                GetLocationComponent(
+                                    classId = destination.classId,
+                                    confirmButtonText = {
+                                        Text("设置")
+                                    }) {
+                                    isMapGetting = false
+                                    locationData = it
+                                    pendingAutoSignAction?.invoke()
+                                    pendingAutoSignAction = null
+                                }
+                                BackHandler(isMapGetting) {
+                                    pendingAutoSignAction = null
+                                    isSigning.value = false
+                                    isMapGetting = false
+                                }
                             }
                         }
-                    }
                     }
                 } else {
                     CenterCircularProgressIndicator()

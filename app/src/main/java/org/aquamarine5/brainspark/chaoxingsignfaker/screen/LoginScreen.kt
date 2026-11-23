@@ -67,13 +67,14 @@ import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.LocalSnackbarHostS
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.UMengHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.chaoxingDataStore
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.displaySnackbar
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.sentryReport
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.snackbarReport
 import org.aquamarine5.brainspark.stackbricks.StackbricksComponent
 import org.aquamarine5.brainspark.stackbricks.StackbricksService
 
 @Serializable
 data class LoginDestination(
-    val isFailureNetworkRedirect: Boolean = false
+    val failureNetworkRedirectPhoneNumber: String? = null
 )
 
 @Composable
@@ -82,7 +83,9 @@ fun LoginPage(
     stackbricksService: StackbricksService,
     navToCourseListDestination: () -> Unit
 ) {
-    var phoneNumber by remember { mutableStateOf("") }
+    var phoneNumber by remember(destination.failureNetworkRedirectPhoneNumber) {
+    mutableStateOf(destination.failureNetworkRedirectPhoneNumber ?: "")
+}
     var password by remember { mutableStateOf("") }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -178,7 +181,7 @@ fun LoginPage(
         }
         Spacer(modifier = Modifier.height(8.dp))
 
-        if (destination.isFailureNetworkRedirect) {
+        if (destination.failureNetworkRedirectPhoneNumber != null) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -250,6 +253,7 @@ fun LoginPage(
                                     hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
                                     context.startActivity(Intent(Intent.ACTION_SEND).apply {
                                         setData("mailto:aquamarine5forever@gmail.com".toUri())
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                         putExtra(Intent.EXTRA_EMAIL, "aquamarine5forever@gmail.com")
                                         putExtra(Intent.EXTRA_CC, "aquamarine5forever@gmail.com")
                                         putExtra(
@@ -258,6 +262,9 @@ fun LoginPage(
                                         )
                                         putExtra(Intent.EXTRA_TEXT, "Your content:")
                                     })
+                                }.onFailure {
+                                    snackbarHost.displaySnackbar("无法打开邮件应用", coroutineScope)
+                                    it.sentryReport()
                                 }
                             },
                             shape = RoundedCornerShape(18.dp),

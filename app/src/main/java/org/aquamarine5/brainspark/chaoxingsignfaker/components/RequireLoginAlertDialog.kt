@@ -23,13 +23,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingOtherUserSharedEntity
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.sentryReport
 
 @Composable
 fun RequireLoginAlertDialog(
@@ -42,6 +45,7 @@ fun RequireLoginAlertDialog(
     var errorText by remember { mutableStateOf("") }
     val context = LocalContext.current
     val coroutineContext = rememberCoroutineScope()
+    val hapticFeedback = LocalHapticFeedback.current
     if (isShowDialog) {
         SnackbarAlertDialog(
             onDismissRequest = { },
@@ -72,10 +76,12 @@ fun RequireLoginAlertDialog(
             confirmButton = {
                 Button(
                     onClick = {
+                        hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
                         coroutineContext.launch {
                             runCatching {
                                 ChaoxingHttpClient.checkSharedEntity(phoneNumber, password, context)
                             }.onFailure {
+                                it.sentryReport()
                                 errorText = it.message ?: "登录失败"
                             }.onSuccess {
                                 onSharedEntityReceived(it)
@@ -90,6 +96,7 @@ fun RequireLoginAlertDialog(
             dismissButton = {
                 OutlinedButton(
                     onClick = {
+                        hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
                         isShowDialog = false
                         naviBack()
                     },

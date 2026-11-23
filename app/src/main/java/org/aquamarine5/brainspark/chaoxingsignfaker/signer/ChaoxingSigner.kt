@@ -29,78 +29,198 @@ import okhttp3.Response
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingCourseHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingFaceHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpRequester
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.toOriginSignHost
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingCaptchaDataEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingLocationSignEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignActivityStatus
 import org.aquamarine5.brainspark.chaoxingsignfaker.signer.ChaoxingQRCodeSigner.QRCodeExpiredException
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingDeviceCodeDuplicatedSignException
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingFaceSignException
-import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingPredictableException
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingParseDataException
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingUserSessionOutdatedException
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.UMengHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.checkResponseThrowException
+import java.util.Locale
 import java.util.UUID
 import kotlin.time.Duration.Companion.seconds
 
+
 abstract class ChaoxingSigner(
-    val client: ChaoxingHttpClient,
+    val client: ChaoxingHttpRequester,
     val activeId: Long,
     val classId: Int,
-    val courseId: Int,
+    val courseId: Long,
     val extContent: String,
-    baseSignInfo: JSONObject? = null
+    baseSignInfo: JSONObject? = null,
+    val isOldSignVersion: Boolean = false,
+    val chatId: Long? = null
 ) {
     companion object {
         val URL_PERSIGN =
-            "https://mobilelearn.chaoxing.com/newsign/preSign?&general=1&sys=1&ls=1&appType=15&isTeacherViewOpen=0".toHttpUrl()
+            "https://data-xxt.aichaoxing.com/newsign/preSign".toHttpUrl()
         val URL_SIGN_INFO =
             "https://mobilelearn.chaoxing.com/v2/apis/active/getPPTActiveInfo".toHttpUrl()
         val URL_ANALYSIS =
             "https://mobilelearn.chaoxing.com/pptSign/analysis?vs=1&DB_STRATEGY=RANDOM".toHttpUrl()
         val URL_AFTER_ANALYSIS2 =
             "https://mobilelearn.chaoxing.com/pptSign/analysis2?DB_STRATEGY=RANDOM".toHttpUrl()
+        val URL_PRESIGN_OLD =
+            "https://mobilelearn.chaoxing.com/sign/preStuSign".toHttpUrl()
+        val URL_SIGN_OLD =
+            "https://mobilelearn.chaoxing.com/sign/stuSignajax".toHttpUrl()
         val URL_CAPTCHA_CONF =
             "https://captcha.chaoxing.com/captcha/get/conf?callback=cx_captcha_function".toHttpUrl()
         val URL_CAPTCHA_RESULT =
             "https://captcha.chaoxing.com/captcha/check/verification/result?callback=cx_captcha_function".toHttpUrl()
         val URL_CAPTCHA_IMAGE =
             "https://captcha.chaoxing.com/captcha/get/verification/image".toHttpUrl()
+        val URL_SIGN_DETAIL =
+            "https://mobilelearn.chaoxing.com/newsign/signDetail".toHttpUrl()
         val URL_SIGN =
             "https://mobilelearn.chaoxing.com/pptSign/stuSignajax?&clientip=&appType=15&ifTiJiao=1&vpProbability=-1&vpStrategy=".toHttpUrl()
+        val URL_SIGN_NO_PARAMETER =
+            "https://mobilelearn.chaoxing.com/pptSign/stuSignajax".toHttpUrl()
+        private val SIGNED_STATUSES = setOf(1, 2, 3, 9)
+        private const val HTTP_CODE_FORBIDDEN = 403
+        private val PRIMARY_ATTEND_STATUS_PATTERN =
+            """"primaryAttend"\s*:\s*\{[^{}]*?"status"\s*:\s*(\d+)""".toRegex()
+        private val SIGN_STATUS_PATTERN = """signstatus\s*=\s*(\d+)""".toRegex()
+
+        fun buildOldPreSignUrl(
+            activeId: Long,
+            chatId: Long?,
+            puid: Int,
+            classId: Int = 0,
+            courseId: Long = 0L
+        ): HttpUrl =
+            URL_PRESIGN_OLD.newBuilder()
+                .addQueryParameter("activeId", activeId.toString())
+                .addQueryParameter("code", "")
+                .addQueryParameter("uid", puid.toString())
+                .addQueryParameter("courseId", courseId.toString())
+                .addQueryParameter("classId", classId.toString())
+                .addQueryParameter("general", "0")
+                .addQueryParameter("chatId", (chatId ?: 0L).toString())
+                .addQueryParameter("appType", "0")
+                .addQueryParameter("tid", "null")
+                .addQueryParameter("atype", "null")
+                .addQueryParameter("sys", "0")
+                .build()
     }
 
     private var storageSignInfo: JSONObject? = baseSignInfo
 
-    class SignExpiredException : ChaoxingPredictableException("签到已截止")
+    protected fun Request.Builder.postSignForm(): Request.Builder {
+        val url = build().url
+        val formBuilder = FormBody.Builder()
+        url.queryParameterNames.forEach { name ->
+            url.queryParameterValues(name).forEach { value ->
+                formBuilder.add(name, value ?: "")
+            }
+        }
+        return url(url.newBuilder().query(null).build())
+            .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .post(formBuilder.build())
+    }
 
-    class SignAlreadyEndedException : ChaoxingPredictableException("迟到或签到已结束")
+    protected fun getPreSignUrl(): HttpUrl = buildPreSignUrl()
 
-    class SignActivityNoPermissionException : ChaoxingPredictableException("此用户不在班级")
+    protected fun getOriginPreSignUrl(): HttpUrl = buildPreSignUrl().toOriginSignHost()
 
-    class AlreadySignedException : ChaoxingPredictableException("已经签到过了")
+    private fun buildPreSignUrl(): HttpUrl = URL_PERSIGN.newBuilder()
+        .addQueryParameter("courseId", courseId.toString())
+        .addQueryParameter("classId", classId.toString())
+        .addQueryParameter("activePrimaryId", activeId.toString())
+        .addQueryParameter("general", "1")
+        .addQueryParameter("sys", "1")
+        .addQueryParameter("ls", "1")
+        .addQueryParameter("appType", "15")
+        .addQueryParameter("uid", client.puid.toString())
+        .addQueryParameter("isTeacherViewOpen", "0")
+        .build()
 
-    class PredictedAlreadySignedException : ChaoxingPredictableException("重复签到")
+    protected fun buildOldSignUrlBuilder(): HttpUrl.Builder = URL_SIGN_OLD.newBuilder()
+        .addQueryParameter("activeId", activeId.toString())
+        .addQueryParameter("uid", client.puid.toString())
+        .addQueryParameter("clientip", "")
+        .apply {
+            if (courseId > 0L) addQueryParameter("courseId", courseId.toString())
+            if (classId > 0) addQueryParameter("classId", classId.toString())
+        }
 
-    class CaptchaTimeoutException : ChaoxingPredictableException("获取验证码信息超时")
+    var signEnc2: String? = null
+        protected set
 
-    class CaptchaException : ChaoxingPredictableException("验证码获取失败")
+    class SignExpiredException(throwable: Throwable? = null) :
+        ChaoxingParseDataException("签到已截止", throwable)
 
-    class CaptchaCheckException(message: String) :
-        ChaoxingPredictableException("$message, 验证码校验失败")
+    class SignAlreadyEndedException(throwable: Throwable? = null) :
+        ChaoxingParseDataException("迟到或签到已结束", throwable)
 
-    class WrongPositionException(distance: Float? = null) :
-        ChaoxingPredictableException("位置不在设置范围内${if (distance != null) "，距离签到点${distance}米" else ""}")
+    class SignActivityNoPermissionException(throwable: Throwable? = null) :
+        ChaoxingParseDataException("此用户不在班级", throwable)
 
-    abstract suspend fun checkAlreadySign(response: String): Boolean
+    class AlreadySignedException(throwable: Throwable? = null) :
+        ChaoxingParseDataException("已经签到过了", throwable)
+
+    class PredictedAlreadySignedException(throwable: Throwable? = null) :
+        ChaoxingParseDataException("重复签到", throwable)
+
+    class CaptchaTimeoutException(throwable: Throwable? = null) :
+        ChaoxingParseDataException("获取验证码信息超时", throwable)
+
+    class CaptchaException(throwable: Throwable? = null) :
+        ChaoxingParseDataException("验证码获取失败", throwable)
+
+    class CaptchaCheckException(message: String, throwable: Throwable? = null) :
+        ChaoxingParseDataException("$message, 验证码校验失败", throwable)
+
+    class WrongPositionException(
+        distance: Float? = null,
+        throwable: Throwable? = null,
+        val isAlreadyDisabledRandomizedLocation: Boolean = false
+    ) :
+        ChaoxingParseDataException(
+            "位置不在设置范围内${if (distance != null) "，距离签到点${distance}米" else ""}",
+            throwable
+        )
+
+    protected open val notSignedPageMarkers: List<String> = emptyList()
+
+    private fun extractIntStatus(response: String, pattern: Regex): Int? =
+        pattern.find(response)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+    open suspend fun checkAlreadySign(response: String): Boolean {
+        val primaryStatus = extractIntStatus(response, PRIMARY_ATTEND_STATUS_PATTERN)
+            ?: extractIntStatus(response, SIGN_STATUS_PATTERN)
+        if (primaryStatus != null) {
+            Log.d("ChaoxingSigner", "Primary sign status: $primaryStatus")
+            return primaryStatus in SIGNED_STATUSES
+        }
+        if (notSignedPageMarkers.any { response.contains(it) }) {
+            Log.d("ChaoxingSigner", "Matched not signed page marker")
+        } else {
+            Log.d("ChaoxingSigner", "No sign status found, treat as not signed")
+        }
+        return false
+    }
 
     open suspend fun checkExpiredSign(response: String): Boolean {
         return response.contains("下次早点哦")
     }
 
-    open suspend fun checkSignStatusThrowException() {
-        when (preSign()) {
+    open suspend fun checkSignStatusThrowException(context: Context) {
+        when (preSign(context)) {
             ChaoxingSignActivityStatus.EXPIRED -> throw SignExpiredException()
             ChaoxingSignActivityStatus.ALREADY_SIGNED -> throw PredictedAlreadySignedException()
             else -> {
-                if (ChaoxingCourseHelper.checkClassValid(client, classId) == false)
+                if (!isOldSignVersion && ChaoxingCourseHelper.checkClassValid(
+                        client,
+                        classId
+                    ) == false
+                )
                     throw SignActivityNoPermissionException()
             }
         }
@@ -108,6 +228,9 @@ abstract class ChaoxingSigner(
 
     open suspend fun getSignInfo(): JSONObject = withContext(Dispatchers.IO) {
         storageSignInfo?.let { return@withContext it }
+        if (isOldSignVersion) {
+            return@withContext JSONObject().apply { storageSignInfo = this }
+        }
         client.newCall(
             Request.Builder().get().url(
                 URL_SIGN_INFO.newBuilder()
@@ -135,32 +258,53 @@ abstract class ChaoxingSigner(
         return getSignInfo().getInteger("ifopenAddress") == 1
     }
 
-    open suspend fun preSign(): ChaoxingSignActivityStatus = withContext(Dispatchers.IO) {
-        client.newCall(
-            Request.Builder().post(
-                FormBody.Builder().addEncoded("ext", extContent).build()
-            ).url(
-                URL_PERSIGN.newBuilder()
-                    .addQueryParameter("courseId", courseId.toString())
-                    .addQueryParameter("classId", classId.toString())
-                    .addQueryParameter("activePrimaryId", activeId.toString())
-                    .addQueryParameter("uid", client.userEntity.puid.toString())
+    open suspend fun preSign(context: Context): ChaoxingSignActivityStatus =
+        withContext(Dispatchers.IO) {
+            val response = requestPreSign()
+            if (response.code == HTTP_CODE_FORBIDDEN) {
+                response.close()
+                if (!client.reLogin(context)) throw ChaoxingUserSessionOutdatedException()
+                val retried = requestPreSign()
+                if (retried.code == HTTP_CODE_FORBIDDEN) {
+                    retried.close()
+                    throw ChaoxingUserSessionOutdatedException()
+                }
+                handlePreSignResponse(retried)
+            } else handlePreSignResponse(response)
+        }
+
+    private fun requestPreSign(): Response =
+        if (isOldSignVersion)
+            client.newCall(
+                Request.Builder().get().url(
+                    buildOldPreSignUrl(activeId, chatId, client.puid, classId, courseId)
+                )
                     .build()
-            ).build()
-        ).execute().use {
-            it.checkResponseThrowException()
-            val body = it.body.string()
-            if (it.code == 302 || body.contains("校验失败，未查询到活动数据")) {
-                throw SignActivityNoPermissionException()
-            }
-            postAnalysis()
-            return@withContext if (checkExpiredSign(body)) {
-                ChaoxingSignActivityStatus.EXPIRED
-            } else if (checkAlreadySign(body)) {
-                ChaoxingSignActivityStatus.ALREADY_SIGNED
-            } else {
-                ChaoxingSignActivityStatus.READY_TO_SIGN
-            }
+            ).execute()
+        else
+            client.newCall(
+                Request.Builder().post(
+                    FormBody.Builder().addEncoded("ext", extContent).build()
+                ).url(
+                    getPreSignUrl()
+                ).build()
+            ).execute()
+
+    private suspend fun handlePreSignResponse(
+        response: Response
+    ): ChaoxingSignActivityStatus = response.use {
+        it.checkResponseThrowException()
+        val body = it.body.string()
+        if (it.code == 302 || body.contains("校验失败，未查询到活动数据")) {
+            throw SignActivityNoPermissionException()
+        }
+        if (!isOldSignVersion) postAnalysis()
+        return@use if (checkExpiredSign(body)) {
+            ChaoxingSignActivityStatus.EXPIRED
+        } else if (checkAlreadySign(body)) {
+            ChaoxingSignActivityStatus.ALREADY_SIGNED
+        } else {
+            ChaoxingSignActivityStatus.READY_TO_SIGN
         }
     }
 
@@ -199,8 +343,14 @@ abstract class ChaoxingSigner(
         addQueryParameter(
             parameterName, JSONObject()
                 .fluentPut("result", 1)
-                .fluentPut("latitude", "%.6f".format(position.latitude).toDouble())
-                .fluentPut("longitude", "%.6f".format(position.longitude).toDouble())
+                .fluentPut(
+                    "latitude",
+                    "%.6f".format(Locale.US, position.randomizedLatitude).toDouble()
+                )
+                .fluentPut(
+                    "longitude",
+                    "%.6f".format(Locale.US, position.randomizedLongitude).toDouble()
+                )
                 .fluentPut("address", position.address)
                 .apply {
                     if (isMockData) {
@@ -228,15 +378,38 @@ abstract class ChaoxingSigner(
         return addLocationDataParameter(position ?: return this, "locationResult", true)
     }
 
-    protected open suspend fun HttpUrl.Builder.addFaceRecognitionParameter(faceImageObjectId: String?): HttpUrl.Builder {
+    protected open fun HttpUrl.Builder.addCourseIdParameter(): HttpUrl.Builder {
+        addQueryParameter("courseId", courseId.toString())
+        return this
+    }
+
+    protected open fun HttpUrl.Builder.addEnc2Parameter(enc2: String?): HttpUrl.Builder {
+        if (enc2 == null) return this
+        addQueryParameter("enc2", enc2)
+        return this
+    }
+
+    protected open fun HttpUrl.Builder.addValidateQueryParameter(
+        captchaValidate: String?
+    ): HttpUrl.Builder {
+        if (captchaValidate == null) return this
+        addQueryParameter("validate", captchaValidate)
+        return this
+    }
+
+    protected open suspend fun HttpUrl.Builder.addFaceRecognitionParameter(
+        faceImageObjectId: String?,
+        context: Context,
+        isCourseIdParameterAdded: Boolean = false
+    ): HttpUrl.Builder {
         if (faceImageObjectId == null) return this
         addQueryParameter("currentFaceId", faceImageObjectId)
         addQueryParameter("ifCFP", "0")
-        addQueryParameter("courseId", courseId.toString())
+        if (!isCourseIdParameterAdded) addCourseIdParameter()
         addQueryParameter(
             "faceEnc",
             ChaoxingFaceHelper.checkFaceResultAndGetEnc(
-                client,
+                (client as? ChaoxingHttpClient) ?: client.toChaoxingHttpClient(context),
                 faceImageObjectId,
                 activeId
             )
@@ -246,24 +419,43 @@ abstract class ChaoxingSigner(
         return this
     }
 
-    protected open fun Response.checkSignResult(): Boolean {
+    protected open fun Response.checkSignResult(position: ChaoxingLocationSignEntity? = null): Boolean {
         val result = body.string()
         if (result.startsWith("[face]"))
             throw ChaoxingFaceSignException(result.removePrefix("[face]"))
         if (result == "success2")
             throw SignAlreadyEndedException()
+        if (result == "fail-need-qrcode")
+            throw ChaoxingParseDataException(
+                "签到失败：服务端要求提交二维码参数（enc），请重新扫描老师展示的二维码",
+                data = result
+            )
         if (result == "签到失败，请重新扫描。")
             throw QRCodeExpiredException()
-        if (result.startsWith("errorLocation"))
-            throw WrongPositionException(result.split("_").getOrNull(1)?.toFloatOrNull())
+        if (result.startsWith("checkFace_")) {
+            signEnc2 = result.removePrefix("checkFace_").ifBlank { null }
+            throw ChaoxingParseDataException(result, data = result)
+        }
+        if (result.startsWith("errorLocation")) {
+            val isAlreadyDisabled = position?.isRandomizationTightened == true
+            position?.disableRandomizedLocation()
+            throw WrongPositionException(
+                result.split("_").getOrNull(1)?.toFloatOrNull(),
+                isAlreadyDisabledRandomizedLocation = isAlreadyDisabled
+            )
+        }
         if (result == "您已签到过了") {
             throw AlreadySignedException()
         }
+        if (result.contains("同一设备不允许重复签到")) {
+            throw ChaoxingDeviceCodeDuplicatedSignException()
+        }
         if (result.startsWith("validate")) {
+            signEnc2 = result.removePrefix("validate_").ifBlank { null }
             return true
         }
         if (result != "success") {
-            throw ChaoxingPredictableException(result)
+            throw ChaoxingParseDataException(result, data = result)
         } else {
             return false
         }
@@ -290,12 +482,7 @@ abstract class ChaoxingSigner(
                     .addQueryParameter("_", System.currentTimeMillis().toString())
                     .build()
             ).header(
-                "Referer", URL_PERSIGN.newBuilder()
-                    .addQueryParameter("courseId", courseId.toString())
-                    .addQueryParameter("classId", classId.toString())
-                    .addQueryParameter("activePrimaryId", activeId.toString())
-                    .addQueryParameter("uid", client.userEntity.puid.toString())
-                    .build().toString()
+                "Referer", getOriginPreSignUrl().toString()
             ).build()
         ).execute().use {
             it.checkResponseThrowException()
@@ -339,12 +526,7 @@ abstract class ChaoxingSigner(
         getCaptchaData(context) {
             client.newCall(
                 Request.Builder().get().url(it).header(
-                    "Referer", URL_PERSIGN.newBuilder()
-                        .addQueryParameter("courseId", courseId.toString())
-                        .addQueryParameter("classId", classId.toString())
-                        .addQueryParameter("activePrimaryId", activeId.toString())
-                        .addQueryParameter("uid", client.userEntity.puid.toString())
-                        .build().toString()
+                    "Referer", getOriginPreSignUrl().toString()
                 ).build()
             ).execute().use { response ->
                 val jsonResult = JSONObject.parseObject(
@@ -411,14 +593,7 @@ abstract class ChaoxingSigner(
                             return super.shouldInterceptRequest(view, request)
                         }
                     }
-                    webview?.loadUrl(
-                        URL_PERSIGN.newBuilder()
-                            .addQueryParameter("courseId", courseId.toString())
-                            .addQueryParameter("classId", classId.toString())
-                            .addQueryParameter("activePrimaryId", activeId.toString())
-                            .addQueryParameter("uid", client.userEntity.puid.toString())
-                            .build().toString()
-                    )
+                    webview?.loadUrl(getOriginPreSignUrl().toString())
                 }
             job.invokeOnCompletion {
                 if (job.isCancelled)
@@ -452,12 +627,7 @@ abstract class ChaoxingSigner(
                     .addQueryParameter("captchaKey", captchaKey)
                     .addQueryParameter("token", token)
                     .addQueryParameter(
-                        "referer", URL_PERSIGN.newBuilder()
-                            .addQueryParameter("courseId", courseId.toString())
-                            .addQueryParameter("classId", classId.toString())
-                            .addQueryParameter("activePrimaryId", activeId.toString())
-                            .addQueryParameter("uid", client.userEntity.puid.toString())
-                            .build().toString()
+                        "referer", getOriginPreSignUrl().toString()
                     )
                     .addQueryParameter("iv", iv)
                     .addQueryParameter("_", System.currentTimeMillis().toString())

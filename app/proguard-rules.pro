@@ -30,6 +30,7 @@
 -dontnote com.baidu.location.**
 -dontwarn com.baidu.location.**
 -keep class org.aquamarine5.brainspark.stackbricks.NoAvailableManifestException
+-keepnames class * extends java.lang.Throwable
 -keep class androidx.compose.runtime.LeftCompositionCancellationException
 -keep class androidx.compose.runtime.ForgottenCoroutineScopeException
 -keep class androidx.datastore.*.** {*;}
@@ -37,6 +38,12 @@
 
 -keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite* {
    <fields>;
+}
+
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
+   *** get*();
+   boolean has*();
+   void set*(...);
 }
 
 -keep class com.umeng.** {*;}

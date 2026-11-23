@@ -40,8 +40,9 @@ import org.aquamarine5.brainspark.chaoxingsignfaker.R
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.chaoxingDataStore
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.checkResponse
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.sentryReport
 
-private const val UNBLOCKED_BUTTON_CLICK_LIMIT = 10
+private const val UNBLOCKED_BUTTON_CLICK_LIMIT = 8
 
 @Composable
 fun BlockedContent(content: @Composable () -> Unit) {
@@ -70,6 +71,8 @@ fun BlockedContent(content: @Composable () -> Unit) {
                             JSONObject.parseObject(it?.body?.string()).getJSONArray("banfids")
                                 .toList(Int::class.java)
                     }
+                }.onFailure {
+                    it.sentryReport()
                 }
         }
     }
@@ -77,8 +80,8 @@ fun BlockedContent(content: @Composable () -> Unit) {
         if (Debug.isDebuggerConnected() || isBypassBlockedChecking) {
             false
         } else {
-            unblockedButtonClickCount < UNBLOCKED_BUTTON_CLICK_LIMIT && bannedFidList.contains(
-                ChaoxingHttpClient.instance!!.userEntity.fid
+            unblockedButtonClickCount < UNBLOCKED_BUTTON_CLICK_LIMIT && ChaoxingHttpClient.instance != null && bannedFidList.contains(
+                ChaoxingHttpClient.instance!!.configuredFid
             )
         }
     ) {

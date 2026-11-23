@@ -88,14 +88,18 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.aquamarine5.brainspark.chaoxingsignfaker.R
 import org.aquamarine5.brainspark.chaoxingsignfaker.ui.theme.FontGilroy
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingPredictableException
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.LocalSnackbarHostState
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.chaoxingDataStore
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.decodeCapturedBitmap
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.decodePhotoBitmap
-import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.displaySnackbar
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.readJpegBytes
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.scaleDownToMaxDimension
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.snackbarReport
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration.Companion.milliseconds
 
 @OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
@@ -125,20 +129,21 @@ fun CameraComponent(
             val preview = remember { Preview.Builder().build() }
             var takeImage by remember { mutableStateOf<Bitmap?>(null) }
             val takeProcessedImage by remember(takeImage) {
-                derivedStateOf {
-                    if (takeImage == null) null
-                    else {
-                        if (takeImage!!.allocationByteCount > 104857600L) {
-                            snackbarHost.displaySnackbar("图片过大，无法显示预览", coroutineScope)
-                            null
-                        } else takeImage!!.asImageBitmap()
-                    }
-                }
+                derivedStateOf { takeImage?.asImageBitmap() }
             }
             var isBackCamera = remember { isDefaultBackCamera }
             val lifecycleOwner = LocalLifecycleOwner.current
             val photoList = remember { mutableListOf<Bitmap>() }
             var needTakePictureCount by remember { mutableIntStateOf(pictureCount) }
+            var isPictureResultDelivered by remember { mutableStateOf(false) }
+            var isCapturing by remember { mutableStateOf(false) }
+            LaunchedEffect(pictureCount) {
+                if (pictureCount != needTakePictureCount) {
+                    photoList.clear()
+                    needTakePictureCount = pictureCount
+                    isPictureResultDelivered = false
+                }
+            }
             DisposableEffect(lifecycleOwner) {
                 future.addListener({
                     val cameraProvider = future.get()
@@ -161,6 +166,21 @@ fun CameraComponent(
                 modifier = Modifier.fillMaxSize()
             )
             var job: Job? = remember { null }
+
+            fun addCapturedPhoto(bitmap: Bitmap) {
+                if (isPictureResultDelivered || photoList.size >= pictureCount) return
+                photoList.add(bitmap)
+                job?.cancel()
+                takeImage = bitmap
+                needTakePictureCount = pictureCount - photoList.size
+                hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
+                if (needTakePictureCount <= 0) {
+                    isPictureResultDelivered = true
+                    onPictureResult(photoList.toList())
+                } else {
+                    onNextPhoto?.invoke()
+                }
+            }
             Box(modifier = Modifier.align(Alignment.Center)) {
                 AnimatedContent(
                     takeProcessedImage,
@@ -207,17 +227,9 @@ fun CameraComponent(
                     if (uri == null) return@rememberLauncherForActivityResult
                     runCatching {
                         val image = application.contentResolver.decodePhotoBitmap(uri)
+                            ?.scaleDownToMaxDimension()
                             ?: error("无法读取图片")
-                        photoList.add(image)
-                        job?.cancel()
-                        takeImage = image
-                        needTakePictureCount--
-                        hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
-                        if (needTakePictureCount <= 0) {
-                            onPictureResult(photoList)
-                        } else {
-                            onNextPhoto?.invoke()
-                        }
+                        addCapturedPhoto(image)
                     }.onFailure {
                         it.snackbarReport(
                             snackbarHost,
@@ -236,17 +248,9 @@ fun CameraComponent(
                     runCatching {
                         uris.forEach { uri ->
                             val image = application.contentResolver.decodePhotoBitmap(uri)
+                                ?.scaleDownToMaxDimension()
                                 ?: throw ChaoxingPredictableException("无法读取图片")
-                            photoList.add(image)
-                            takeImage = image
-                            needTakePictureCount--
-                        }
-                        job?.cancel()
-                        hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
-                        if (needTakePictureCount <= 0) {
-                            onPictureResult(photoList)
-                        } else {
-                            onNextPhoto?.invoke()
+                            addCapturedPhoto(image)
                         }
                     }.onFailure {
                         it.snackbarReport(
@@ -412,27 +416,45 @@ fun CameraComponent(
             }
             Surface(
                 onClick = {
+                    if (isCapturing || isPictureResultDelivered) return@Surface
+                    isCapturing = true
                     imageCapture.takePicture(
                         ContextCompat.getMainExecutor(application),
                         object : ImageCapture.OnImageCapturedCallback() {
                             override fun onCaptureSuccess(image: ImageProxy) {
-                                super.onCaptureSuccess(image)
-                                image.use {
-                                    val bitmap = it.toBitmap()
-                                    photoList.add(bitmap)
-                                    job?.cancel()
-                                    takeImage = bitmap
-                                    needTakePictureCount--
-                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
-                                    if (needTakePictureCount <= 0) {
-                                        onPictureResult(photoList)
-                                    } else {
-                                        onNextPhoto?.invoke()
+                                val jpegBytes = runCatching {
+                                    image.use { it.readJpegBytes() }
+                                }.getOrElse {
+                                    isCapturing = false
+                                    it.snackbarReport(
+                                        snackbarHost,
+                                        coroutineScope,
+                                        "拍照失败",
+                                        hapticFeedback
+                                    )
+                                    return
+                                }
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    val result = runCatching {
+                                        jpegBytes.decodeCapturedBitmap().scaleDownToMaxDimension()
+                                    }
+                                    withContext(Dispatchers.Main) {
+                                        isCapturing = false
+                                        result.onSuccess { addCapturedPhoto(it) }.onFailure {
+                                            if (it is CancellationException) throw it
+                                            it.snackbarReport(
+                                                snackbarHost,
+                                                coroutineScope,
+                                                "照片解析失败，请重新拍摄",
+                                                hapticFeedback
+                                            )
+                                        }
                                     }
                                 }
                             }
 
                             override fun onError(exception: ImageCaptureException) {
+                                isCapturing = false
                                 exception.snackbarReport(
                                     snackbarHost,
                                     coroutineScope,

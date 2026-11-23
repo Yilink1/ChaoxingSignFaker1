@@ -6,6 +6,9 @@
 
 package org.aquamarine5.brainspark.chaoxingsignfaker
 
+//noinspection UsingMaterialAndMaterial3Libraries
+//noinspection UsingMaterialAndMaterial3Libraries
+//noinspection UsingMaterialAndMaterial3Libraries
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -23,8 +26,12 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -33,6 +40,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.BottomNavigation
@@ -59,6 +67,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
@@ -82,21 +92,23 @@ import coil3.request.crossfade
 import com.baidu.location.LocationClient
 import com.baidu.mapapi.SDKInitializer
 import com.umeng.analytics.MobclickAgent
-import io.sentry.Sentry
 import io.sentry.android.core.SentryAndroid
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingCourseHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingFaceHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClientPool
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpRequesterPool
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CenterCircularProgressIndicator
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CloneSessionTips
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.FavoriteLocationSettingComponent
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.FavoriteLocationSettingDestination
-import org.aquamarine5.brainspark.chaoxingsignfaker.components.initializeClientInfo
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.chaoxingClientInfo
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingClientInfo
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingCourseEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingEasemobIMGroup
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignActivityEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.NavigationBarItemData
@@ -129,6 +141,7 @@ import org.aquamarine5.brainspark.chaoxingsignfaker.screen.SettingScreen
 import org.aquamarine5.brainspark.chaoxingsignfaker.screen.SignGraphDestination
 import org.aquamarine5.brainspark.chaoxingsignfaker.screen.WelcomeDestination
 import org.aquamarine5.brainspark.chaoxingsignfaker.screen.WelcomeScreen
+import org.aquamarine5.brainspark.chaoxingsignfaker.screen.isAllowExternalQuerySettingTipsRequested
 import org.aquamarine5.brainspark.chaoxingsignfaker.screen.isAlwaysForceSign
 import org.aquamarine5.brainspark.chaoxingsignfaker.ui.theme.ChaoxingSignFakerTheme
 import org.aquamarine5.brainspark.chaoxingsignfaker.ui.theme.Orange
@@ -140,11 +153,16 @@ import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.LocalSnackbarHostS
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.UMengHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.chaoxingDataStore
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.isDevelopedMode
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.requirePredictable
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.sentryReport
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.toastReport
 import org.aquamarine5.brainspark.stackbricks.StackbricksPolicy
 import org.aquamarine5.brainspark.stackbricks.StackbricksService
+import org.aquamarine5.brainspark.stackbricks.providers.cloudflare.CloudflareConfiguration
+import org.aquamarine5.brainspark.stackbricks.providers.cloudflare.CloudflareMessageProvider
+import org.aquamarine5.brainspark.stackbricks.providers.cloudflare.CloudflarePackageProvider
 import org.aquamarine5.brainspark.stackbricks.providers.qiniu.QiniuConfiguration
 import org.aquamarine5.brainspark.stackbricks.providers.qiniu.QiniuMessageProvider
-import org.aquamarine5.brainspark.stackbricks.providers.qiniu.QiniuPackageProvider
 import org.aquamarine5.brainspark.stackbricks.rememberStackbricksStatus
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -156,8 +174,15 @@ class MainActivity : ComponentActivity() {
         const val INTENT_EXTRA_EXIT_FLAG = "intent_extra_exit_flag"
     }
 
+    private var pendingSignRequest by mutableStateOf<ExternalSignRequest?>(null)
+
+    private var isPendingOpenAllowExternalQuerySetting by mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingSignRequest = intent.parseExternalSignRequest()
+        isPendingOpenAllowExternalQuerySetting =
+            intent.isOpenSettingToAllowExternalQueryPermission()
         @Suppress("DEPRECATION")
         val versionData = packageManager.getPackageInfo(
             packageName,
@@ -172,36 +197,42 @@ class MainActivity : ComponentActivity() {
             MessageDigest.getInstance("SHA-256").digest(it.toByteArray())
                 .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
         }
-        SentryAndroid.init(this) {
+        SentryAndroid.init(this) { options ->
             if (Debug.isDebuggerConnected()) {
-                it.isEnabled = false
+                options.isEnabled = false
             }
+
+            options.setTracePropagationTargets(emptyList<String>())
 
             val versionName = versionData.versionName!!
             if (versionName.contains("rc"))
-                it.environment = "rc"
+                options.environment = "rc"
             else if (versionName.contains("beta"))
-                it.environment = "beta"
+                options.environment = "beta"
             else if (versionName.contains("alpha")) {
-                it.environment = "alpha"
-                it.isAnrEnabled = false
+                options.environment = "alpha"
+                options.isAnrEnabled = false
             } else
-                it.environment = "stable"
+                options.environment = "stable"
             val ignoreExceptions = listOf(
+                "ChaoxingGetUserInfoException",
+                "NoAvailableManifestException",
+                "NoAvailablePackageException",
                 "ForgottenCoroutineScopeException",
                 "LeftCompositionCancellationException",
                 "SocketTimeoutException",
                 "UnknownHostException",
                 "ConnectException",
-                "SSLHandshakeException"
+                "SSLHandshakeException",
+                "SocketException"
             )
-            it.beforeSend = { event, hint ->
+            options.beforeSend = { event, _ ->
                 event.setExtra("sign", verifiedSignature)
                 if (ignoreExceptions.contains(event.throwable?.javaClass?.simpleName)) {
                     null
                 } else {
                     (event.throwable as? ChaoxingParseDataException)?.let {
-                        event.setExtra("data", it.data ?: "null")
+                        event.setExtra("data", it.data ?: "empty")
                     }
                     event
                 }
@@ -216,6 +247,18 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(false)
             }
             var destination by remember { mutableStateOf<Any?>(null) }
+            LaunchedEffect(destination) {
+                val loginDestination = destination as? LoginDestination ?: return@LaunchedEffect
+                if (ChaoxingHttpClient.instance != null) return@LaunchedEffect
+                if (navController.currentBackStackEntry?.destination?.hasRoute(LoginDestination::class) == true) return@LaunchedEffect
+                runCatching {
+                    navController.navigate(loginDestination) {
+                        popUpTo(navController.graph.id) { inclusive = true }
+                    }
+                }.onFailure {
+                    it.sentryReport()
+                }
+            }
             val snackbarHostState = remember { SnackbarHostState() }
             ChaoxingSignFakerTheme {
                 CompositionLocalProvider(LocalSnackbarHostState provides snackbarHostState) {
@@ -243,8 +286,13 @@ class MainActivity : ComponentActivity() {
                                 exit = shrinkVertically()
                             ) {
                                 BottomNavigation(
-                                    backgroundColor = MaterialTheme.colorScheme.primaryContainer,
-                                    elevation = 14.dp
+                                    modifier = Modifier
+                                        .shadow(14.dp, clip = false)
+                                        .background(MaterialTheme.colorScheme.primaryContainer)
+                                        .navigationBarsPadding(),
+                                    backgroundColor = Color.Transparent,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    elevation = 0.dp
                                 ) {
                                     remember {
                                         listOf(
@@ -292,7 +340,7 @@ class MainActivity : ComponentActivity() {
                                                             }
                                                         }
                                                     }.onFailure {
-                                                        Sentry.captureException(it)
+                                                        it.sentryReport()
                                                         it.printStackTrace()
                                                     }
                                                 }
@@ -353,37 +401,47 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     ) { innerPadding ->
+                        val state = rememberStackbricksStatus()
                         val stackbricksService = remember {
-                            QiniuConfiguration(
+                            val client = OkHttpClient.Builder()
+                                .callTimeout(20, TimeUnit.MINUTES)
+                                .readTimeout(20, TimeUnit.MINUTES)
+                                .writeTimeout(20, TimeUnit.MINUTES)
+                                .retryOnConnectionFailure(true)
+                                .build()
+                            val cloudflareConfiguration = CloudflareConfiguration(
+                                possibleConfigurations = listOf(
+                                    "cdn2.aquamarine5.fun" to "chaoxingsignfaker_stackbricks_manifest.json",
+                                ),
+                                defaultBaseUrl = "https://cdn2.aquamarine5.fun",
+                                okHttpClient = client
+                            )
+                            val qiniuConfiguration = QiniuConfiguration(
                                 possibleConfigurations = listOf(
                                     "cdn.aquamarine5.fun" to "chaoxingsignfaker_stackbricks_manifest.json",
-                                    "cdn.aquamarine5.fun" to "chaoxingsignfaker_stackbricks_v2_manifest.json",
                                     "cdn.aquamarine5.top" to "chaoxingsignfaker_stackbricks_manifest.json",
                                     "cdn.aquamarine5.vip" to "chaoxingsignfaker_stackbricks_manifest.json",
                                 ),
                                 referer = "http://cdn.aquamarine5.fun/",
-                                okHttpClient = OkHttpClient.Builder()
-                                    .callTimeout(20, TimeUnit.MINUTES)
-                                    .readTimeout(20, TimeUnit.MINUTES)
-                                    .writeTimeout(20, TimeUnit.MINUTES)
-                                    .retryOnConnectionFailure(true)
-                                    .build()
+                                okHttpClient = client
                             )
-                        }.let {
-                            val state = rememberStackbricksStatus()
-                            remember {
-                                StackbricksService(
-                                    this,
-                                    QiniuMessageProvider(it),
-                                    QiniuPackageProvider(it),
-                                    state,
-                                    stackbricksPolicy = StackbricksPolicy(
-                                        versionName = BuildConfig.VERSION_NAME,
-                                        isAllowedToDisableCheckUpdateOnLaunch = false,
-                                        isForceInstallValueCallback = false,
-                                    ),
-                                )
-                            }
+                            StackbricksService(
+                                this,
+                                possibleMessageProvider = listOf(
+                                    QiniuMessageProvider(qiniuConfiguration),
+                                    CloudflareMessageProvider(cloudflareConfiguration),
+                                ),
+                                possiblePackageProvider = listOf(
+                                    CloudflarePackageProvider(cloudflareConfiguration),
+//                                    QiniuPackageProvider(qiniuConfiguration),
+                                ),
+                                state = state,
+                                stackbricksPolicy = StackbricksPolicy(
+                                    versionName = BuildConfig.VERSION_NAME,
+                                    isAllowedToDisableCheckUpdateOnLaunch = false,
+                                    isForceInstallValueCallback = false,
+                                ),
+                            )
                         }
                         Column(
                             modifier = Modifier
@@ -412,7 +470,7 @@ class MainActivity : ComponentActivity() {
                                     withContext(Dispatchers.IO) {
                                         val datastore =
                                             applicationContext.chaoxingDataStore.data.first()
-                                        ChaoxingHttpClientPool.initialize(datastore.otherUsersList)
+                                        ChaoxingHttpRequesterPool.initialize(datastore.otherUsersList)
                                         ChaoxingFaceHelper.storedFaceRecognitionImages.setValue(
                                             datastore.faceRecognitionConfiguresMap.mapValues { it.value.imagesList }
                                         )
@@ -421,7 +479,7 @@ class MainActivity : ComponentActivity() {
                                             LocationClient.setAgreePrivacy(true)
                                             SDKInitializer.setAgreePrivacy(applicationContext, true)
                                         }
-                                        initializeClientInfo(
+                                        chaoxingClientInfo = ChaoxingClientInfo.resolve(
                                             datastore.preferences.customizedUserAgent,
                                             datastore.preferences.customizedPackageName
                                         )
@@ -447,6 +505,8 @@ class MainActivity : ComponentActivity() {
                                                                 ChaoxingAnalyser.checkAndUploadAnalyserRankData(
                                                                     applicationContext
                                                                 )
+                                                            }.onFailure {
+                                                                it.sentryReport()
                                                             }
                                                         }
                                                         launch {
@@ -478,7 +538,7 @@ class MainActivity : ComponentActivity() {
                                                                 Toast.LENGTH_SHORT
                                                             ).show()
                                                         }
-                                                        LoginDestination(isFailureNetworkRedirect = true)
+                                                        LoginDestination(failureNetworkRedirectPhoneNumber = datastore.loginSession.phoneNumber)
                                                     }
                                                 }
                                             }
@@ -490,7 +550,7 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     val coroutineScope = rememberCoroutineScope()
                                     val isCloning =
-                                        ChaoxingHttpClient.cloneInstance?.userEntity != null
+                                        ChaoxingHttpClient.cloneInstance != null
                                     val exitCloneMode = {
                                         hapticFeedback.performHapticFeedback(
                                             HapticFeedbackType.ContextClick
@@ -507,6 +567,10 @@ class MainActivity : ComponentActivity() {
                                     }
                                     var showExitCloneDialog by remember { mutableStateOf(false) }
                                     val navBackStackEntry by navController.currentBackStackEntryAsState()
+                                    val isInSignGraph =
+                                        navBackStackEntry?.destination?.hierarchy?.any {
+                                            it.hasRoute(SignGraphDestination::class)
+                                        } == true
                                     BackHandler(
                                         enabled = isCloning &&
                                                 navBackStackEntry?.destination?.hasRoute(
@@ -518,7 +582,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     Column(modifier = Modifier.fillMaxSize()) {
                                         AnimatedVisibility(
-                                            isCloning,
+                                            isCloning && isInSignGraph,
                                             enter = slideInVertically(
                                                 animationSpec = tween(300), initialOffsetY = { -it }
                                             ) + fadeIn(
@@ -536,23 +600,39 @@ class MainActivity : ComponentActivity() {
                                             navController,
                                             destination!!,
                                             enterTransition = {
-                                                fadeIn(
-                                                    animationSpec = tween(300)
+                                                slideInHorizontally(
+                                                    initialOffsetX = { it }
                                                 )
                                             },
                                             exitTransition = {
-                                                fadeOut(
-                                                    animationSpec = tween(300)
+                                                slideOutHorizontally(
+                                                    targetOffsetX = { -it / 2 }
+                                                ) + scaleOut(
+                                                    targetScale = 0.7f
+                                                ) + fadeOut()
+                                            },
+                                            popEnterTransition = {
+                                                slideInHorizontally(
+                                                    initialOffsetX = { -it / 2 }
+                                                ) + scaleIn(
+                                                    initialScale = 0.7f
+                                                ) + fadeIn()
+                                            },
+                                            popExitTransition = {
+                                                slideOutHorizontally(
+                                                    targetOffsetX = { it }
                                                 )
                                             },
                                             predictivePopEnterTransition = {
-                                                fadeIn(
-                                                    animationSpec = tween(300)
-                                                )
+                                                slideInHorizontally(
+                                                    initialOffsetX = { -it / 2 }
+                                                ) + scaleIn(
+                                                    initialScale = 0.7f
+                                                ) + fadeIn()
                                             },
                                             predictivePopExitTransition = {
-                                                fadeOut(
-                                                    animationSpec = tween(300)
+                                                slideOutHorizontally(
+                                                    targetOffsetX = { it }
                                                 )
                                             },
                                         ) {
@@ -583,7 +663,7 @@ class MainActivity : ComponentActivity() {
                                                         }, navToLoginDestination = {
                                                             navController.navigate(
                                                                 LoginDestination(
-                                                                    true
+                                                                    failureNetworkRedirectPhoneNumber = ChaoxingHttpClient.instance?.phoneNumber
                                                                 )
                                                             ) {
                                                                 popUpTo<CourseListDestination> {
@@ -602,7 +682,7 @@ class MainActivity : ComponentActivity() {
                                                 }
                                                 composable<GroupDetailDestination>(
                                                     typeMap = mapOf(
-                                                        typeOf<ChaoxingEasemobIMGroup>() to ChaoxingEasemobIMGroup.ChaoxingEasemobIMGroupNavType
+                                                        typeOf<List<ChaoxingEasemobIMGroup>>() to ChaoxingEasemobIMGroup.ChaoxingEasemobIMGroupListNavType
                                                     )
                                                 ) {
                                                     GroupDetailScreen(
@@ -660,7 +740,11 @@ class MainActivity : ComponentActivity() {
                                                     }
                                                 }
 
-                                                composable<CourseDetailDestination> {
+                                                composable<CourseDetailDestination>(
+                                                    typeMap = mapOf(
+                                                        typeOf<List<ChaoxingCourseEntity>>() to ChaoxingCourseEntity.Companion.ChaoxingCourseEntityListNavType
+                                                    )
+                                                ) {
                                                     CourseDetailScreen(
                                                         it.toRoute(),
                                                         navToSignerDestination = { destination ->
@@ -674,6 +758,9 @@ class MainActivity : ComponentActivity() {
                                                             ) {
                                                                 popUpTo<CourseListDestination>()
                                                             }
+                                                        },
+                                                        navToGroupDetailDestination = {
+                                                            navController.navigate(it)
                                                         }) {
                                                         navController.navigateUp()
                                                     }
@@ -758,7 +845,32 @@ class MainActivity : ComponentActivity() {
                                                         }
                                                     )
                                                 }
-                                                composable<FavoriteLocationSettingDestination> {
+                                                composable<FavoriteLocationSettingDestination>(
+                                                    enterTransition = {
+                                                        slideInHorizontally(
+                                                            initialOffsetX = { it },
+                                                            animationSpec = tween(300)
+                                                        )
+                                                    },
+                                                    exitTransition = {
+                                                        slideOutHorizontally(
+                                                            animationSpec = tween(300),
+                                                            targetOffsetX = { -it }
+                                                        )
+                                                    },
+                                                    popEnterTransition = {
+                                                        slideInHorizontally(
+                                                            initialOffsetX = { -it },
+                                                            animationSpec = tween(300)
+                                                        )
+                                                    },
+                                                    popExitTransition = {
+                                                        slideOutHorizontally(
+                                                            animationSpec = tween(400),
+                                                            targetOffsetX = { (it * 1.5).toInt() }
+                                                        )
+                                                    }
+                                                ) {
                                                     FavoriteLocationSettingComponent(
                                                         modifier = Modifier.fillMaxSize()
                                                     )
@@ -786,6 +898,107 @@ class MainActivity : ComponentActivity() {
                                                 }
                                             }
                                         }
+                                        LaunchedEffect(
+                                            isPendingOpenAllowExternalQuerySetting,
+                                            destination
+                                        ) {
+                                            if (!isPendingOpenAllowExternalQuerySetting) return@LaunchedEffect
+                                            if (destination == null) return@LaunchedEffect
+                                            isPendingOpenAllowExternalQuerySetting = false
+                                            if (destination is LoginDestination || destination is WelcomeDestination) {
+                                                Toast.makeText(
+                                                    applicationContext,
+                                                    "请先登录 ChaoxingSignFaker",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                                return@LaunchedEffect
+                                            }
+                                            isAllowExternalQuerySettingTipsRequested = true
+                                            runCatching {
+                                                navController.navigate(SettingDestination) {
+                                                    launchSingleTop = true
+                                                }
+                                            }.onFailure {
+                                                it.sentryReport()
+                                                it.printStackTrace()
+                                            }
+                                        }
+                                        LaunchedEffect(pendingSignRequest, destination) {
+                                            val request =
+                                                pendingSignRequest ?: return@LaunchedEffect
+                                            if (destination == null) return@LaunchedEffect
+                                            pendingSignRequest = null
+                                            if (destination is LoginDestination || destination is WelcomeDestination) {
+                                                Toast.makeText(
+                                                    applicationContext,
+                                                    "请先登录 ChaoxingSignFaker",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                                return@LaunchedEffect
+                                            }
+                                            runCatching {
+                                                val client = ChaoxingHttpClient.instance
+                                                requirePredictable(client != null) {
+                                                    "请先登录 ChaoxingSignFaker"
+                                                }
+                                                val classId = request.classId
+                                                requirePredictable(classId != null && classId > 0) {
+                                                    "跳转签到列表必须传递 classId"
+                                                }
+                                                val courseId = request.courseId
+                                                requirePredictable(courseId != null && courseId > 0) {
+                                                    "跳转签到列表必须传递 courseId"
+                                                }
+                                                val fid = request.fid
+                                                requirePredictable(fid != null && fid > 0) {
+                                                    "跳转签到列表必须传递 fid"
+                                                }
+                                                val activeId = request.activeId
+                                                val signType = request.signType
+                                                requirePredictable((activeId == null) == (signType == null)) {
+                                                    "跳转签到事件必须同时传递 signType 和 activeId"
+                                                }
+                                                if (client.configuredFid != fid) {
+                                                    client.updateConfiguredFid(
+                                                        applicationContext,
+                                                        fid
+                                                    )
+                                                }
+                                                if (activeId != null && signType != null) {
+                                                    val signDestination =
+                                                        ExternalSignEntry.destinationOf(
+                                                            activeId, classId, courseId, signType
+                                                        )
+                                                    requirePredictable(signDestination != null) {
+                                                        "不支持的 signType: $signType"
+                                                    }
+                                                    navController.navigate(signDestination)
+                                                } else {
+                                                    val courseName = request.courseName
+                                                        ?: runCatching {
+                                                            ChaoxingCourseHelper.queryClassName(
+                                                                client,
+                                                                classId
+                                                            )
+                                                        }.getOrDefault("")
+                                                    val course = ChaoxingCourseEntity(
+                                                        courseName = courseName,
+                                                        teacherName = null,
+                                                        courseId = courseId,
+                                                        classId = classId,
+                                                        className = courseName,
+                                                        imageUrl = "",
+                                                        schools = null,
+                                                        isCloneSession = false
+                                                    )
+                                                    navController.navigate(
+                                                        CourseDetailDestination(listOf(course))
+                                                    )
+                                                }
+                                            }.onFailure {
+                                                it.toastReport(applicationContext, "跳转失败")
+                                            }
+                                        }
                                     }
                                     if (showExitCloneDialog) {
                                         AlertDialog(
@@ -811,11 +1024,17 @@ class MainActivity : ComponentActivity() {
                                                         )
                                                     ) {
                                                         OutlinedButton(onClick = {
+                                                            hapticFeedback.performHapticFeedback(
+                                                                HapticFeedbackType.ContextClick
+                                                            )
                                                             showExitCloneDialog = false
                                                         }) {
                                                             Text("否")
                                                         }
                                                         Button(onClick = {
+                                                            hapticFeedback.performHapticFeedback(
+                                                                HapticFeedbackType.ContextClick
+                                                            )
                                                             showExitCloneDialog = false
                                                             exitCloneMode()
                                                         }) {
@@ -824,6 +1043,9 @@ class MainActivity : ComponentActivity() {
                                                     }
                                                     TextButton(
                                                         onClick = {
+                                                            hapticFeedback.performHapticFeedback(
+                                                                HapticFeedbackType.ContextClick
+                                                            )
                                                             showExitCloneDialog = false
                                                             finishAffinity()
                                                         },
@@ -847,6 +1069,10 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         if (intent.getBooleanExtra(INTENT_EXTRA_EXIT_FLAG, false)) {
             finish()
+        }
+        intent.parseExternalSignRequest()?.let { pendingSignRequest = it }
+        if (intent.isOpenSettingToAllowExternalQueryPermission()) {
+            isPendingOpenAllowExternalQuerySetting = true
         }
         super.onNewIntent(intent)
     }

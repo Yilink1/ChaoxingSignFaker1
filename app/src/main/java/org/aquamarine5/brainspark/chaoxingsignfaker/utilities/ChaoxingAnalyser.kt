@@ -13,13 +13,13 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.listSaver
 import com.alibaba.fastjson2.JSONArray
-import io.sentry.Sentry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.Request
+import org.aquamarine5.brainspark.chaoxingsignfaker.BuildConfig
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.ChaoxingSignFakerDataStore
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingAnalyserRankAnalysis
@@ -85,6 +85,8 @@ object ChaoxingAnalyser {
         }
     }
 
+    private val jsonParser = Json { ignoreUnknownKeys = true }
+
     suspend fun getAnalyserTopRank(topCount: Int): Result<List<ChaoxingAnalyserRankRecord>> {
         return withContext(Dispatchers.IO) {
             runCatching {
@@ -107,7 +109,8 @@ object ChaoxingAnalyser {
                 ).execute().use { response ->
                     response.checkResponseThrowException()
                     val responseBody = response.body.string()
-                    Json.decodeFromString<List<ChaoxingAnalyserRankRecord>>(responseBody)
+                    jsonParser
+                        .decodeFromString<List<ChaoxingAnalyserRankRecord>>(responseBody)
                 }
             }
         }
@@ -121,7 +124,7 @@ object ChaoxingAnalyser {
             context.chaoxingDataStore.updateData { dataStore ->
                 if (dataStore.disableAnalysisRank) return@updateData dataStore
                 val analysisName = dataStore.analysisRankName.ifEmpty {
-                    "****${ChaoxingHttpClient.instance!!.userEntity.phoneNumber.takeLast(2)} 用户"
+                    "****${ChaoxingHttpClient.instance!!.phoneNumber.takeLast(2)} 用户"
                 }
                 dataStore.toBuilder().apply {
                     val analysisDatabaseUUID = analysisUUID.ifEmpty {
@@ -172,25 +175,26 @@ object ChaoxingAnalyser {
                                             .addEncoded("latestDate", stringDate)
                                             .addEncoded(
                                                 "schoolName",
-                                                ChaoxingHttpClient.instance!!.userEntity.schoolName.let { rawList ->
-                                                    if (dataStore.selectedAnalysisRankSchoolName.isNotEmpty() && rawList.contains(
-                                                            dataStore.selectedAnalysisRankSchoolName
+                                                ChaoxingHttpClient.instance!!.userEntity.fidList.map { it.second }
+                                                    .distinct().let { rawList ->
+                                                        if (dataStore.selectedAnalysisRankSchoolName.isNotEmpty() && rawList.contains(
+                                                                dataStore.selectedAnalysisRankSchoolName
+                                                            )
                                                         )
-                                                    )
-                                                        return@let dataStore.selectedAnalysisRankSchoolName
-                                                    rawList.toMutableList().run {
-                                                        removeAll { it[0].isDigit() }
-                                                        removeAll { it.endsWith("图书馆") }
-                                                        if (isEmpty())
-                                                            return@let rawList[0]
-                                                        sortBy { it.length }
-                                                        return@let get(0)
+                                                            return@let dataStore.selectedAnalysisRankSchoolName
+                                                        rawList.toMutableList().run {
+                                                            removeAll { it[0].isDigit() }
+                                                            removeAll { it.endsWith("图书馆") }
+                                                            if (isEmpty())
+                                                                return@let rawList[0]
+                                                            sortBy { it.length }
+                                                            return@let get(0)
+                                                        }
+                                                    }.let { str ->
+                                                        if (dataStore.hideAnalysisRankSchoolName) str.plus(
+                                                            "HIDE"
+                                                        ) else str
                                                     }
-                                                }.let { str ->
-                                                    if (dataStore.hideAnalysisRankSchoolName) str.plus(
-                                                        "HIDE"
-                                                    ) else str
-                                                }
                                             )
                                             .addEncoded("uuid", analysisDatabaseUUID)
                                             .addEncoded(
@@ -199,6 +203,7 @@ object ChaoxingAnalyser {
                                             )
                                             .addEncoded("isPublic", "true")
                                             .addEncoded("name", analysisName)
+                                            .addEncoded("versionName", BuildConfig.VERSION_NAME)
                                             .build()
                                     ).build()
                             )
@@ -210,7 +215,7 @@ object ChaoxingAnalyser {
                             setLastUploadAnalysisTimestamp(System.currentTimeMillis())
                         }.onFailure {
                             it.printStackTrace()
-                            Sentry.captureException(it)
+                            it.sentryReport()
                             withContext(Dispatchers.Main) {
                                 Toast.makeText(
                                     context,

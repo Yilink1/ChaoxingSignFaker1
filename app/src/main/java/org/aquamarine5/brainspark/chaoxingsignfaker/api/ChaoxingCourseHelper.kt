@@ -28,7 +28,7 @@ object ChaoxingCourseHelper {
     private val URL_COURSE_QUERY_NAME =
         "https://mooc1-api.chaoxing.com/gas/clazz?fields=name&view=json".toHttpUrl()
 
-    suspend fun queryClassName(client: ChaoxingHttpClient, classId: Int): String = withContext(
+    suspend fun queryClassName(client: ChaoxingHttpRequester, classId: Int): String = withContext(
         Dispatchers.IO
     ) {
         client.newCall(
@@ -43,7 +43,7 @@ object ChaoxingCourseHelper {
     }
 
     suspend fun checkClassValid(
-        client: ChaoxingHttpClient,
+        client: ChaoxingHttpRequester,
         classId: Int,
     ): Boolean? = withContext(Dispatchers.IO) {
         client.newCall(Request.Builder().get().url(URL_COURSE_LIST).build()).execute().use {
@@ -63,8 +63,8 @@ object ChaoxingCourseHelper {
     }
 
     suspend fun getClassIdFromCourseId(
-        client: ChaoxingHttpClient,
-        courseId: Int
+        client: ChaoxingHttpRequester,
+        courseId: Long
     ): Result<Int?> = withContext(Dispatchers.IO) {
         runCatching {
             client.newCall(Request.Builder().get().url(URL_COURSE_LIST).build()).execute()
@@ -78,8 +78,31 @@ object ChaoxingCourseHelper {
                         if (!course.containsKey("cataName")) continue
                         val courseContent =
                             content.getJSONObject("course").getJSONArray("data").getJSONObject(0)
-                        if (courseContent.getInteger("id") == courseId)
+                        if (courseContent.getLong("id") == courseId)
                             return@runCatching content.getInteger("id")
+                    }
+                    return@runCatching null
+                }
+        }
+    }
+
+    suspend fun getCourseIdFromClassId(
+        client: ChaoxingHttpRequester,
+        classId: Int
+    ): Result<Long?> = withContext(Dispatchers.IO) {
+        runCatching {
+            client.newCall(Request.Builder().get().url(URL_COURSE_LIST).build()).execute()
+                .use { rawResponse ->
+                    val jsonResult = JSONObject.parseObject(rawResponse.body.string())
+                    val channelList = jsonResult.getJSONArray("channelList")
+                    for (i in channelList.indices) {
+                        val course = channelList.getJSONObject(i)
+                        val content = course.getJSONObject("content")
+                        if (!content.containsKey("course")) continue
+                        if (content.getIntValue("id") != classId) continue
+                        val courseContent =
+                            content.getJSONObject("course").getJSONArray("data").getJSONObject(0)
+                        return@runCatching courseContent.getLong("id")
                     }
                     return@runCatching null
                 }
@@ -102,7 +125,7 @@ object ChaoxingCourseHelper {
                     ChaoxingCourseEntity(
                         courseContent.getString("name"),
                         courseContent.getString("teacherfactor"),
-                        courseContent.getInteger("id"),
+                        courseContent.getLong("id"),
                         content.getInteger("id"),
                         courseContent.getString("name"),
                         courseContent.getString("imageurl")

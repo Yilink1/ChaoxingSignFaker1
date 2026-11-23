@@ -36,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
@@ -50,9 +51,11 @@ import okhttp3.Request
 import org.aquamarine5.brainspark.chaoxingsignfaker.R
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingFaceHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClientPool
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpRequesterPool
+import org.aquamarine5.brainspark.chaoxingsignfaker.ui.theme.Orange
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingFaceImageException
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.LocalSnackbarHostState
-import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.randomizeStylizeFaceImage
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.randomizeStylizeImage
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.snackbarReport
 import java.util.concurrent.TimeUnit
 
@@ -74,52 +77,60 @@ fun FaceRecognitionComponent(
         onCancel()
     }
 
-    AlertDialog(
-        onDismissRequest = onCancel,
-        title = { Text("使用默认人脸识别照片？") },
-        icon = {
-            Icon(
-                painterResource(R.drawable.ic_triangle_alert),
-                contentDescription = "警告",
-                tint = Color(0xFFFCC307),
-                modifier = Modifier.size(40.dp)
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(buildAnnotatedString {
-                    append("是否使用代签用户的学习通默认人脸识别照片代替拍摄？")
-                    withStyle(SpanStyle(color = Color.Red, fontWeight = FontWeight.Bold)) {
-                        append("此方式存在风险：使用账号原有照片可能被学习通风控校验识别，导致代签失败甚至影响账号安全。")
-                    }
-                })
-                if (isProcessingProfileImage) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        CircularProgressIndicator()
-                        Text(
-                            "正在获取默认人脸识别照片...(" +
-                                    "${profileImageProgress?.first ?: 0}/${profileImageProgress?.second ?: signUserName.size})"
-                        )
+    if (useProfileImage != false) {
+        AlertDialog(
+            onDismissRequest = onCancel,
+            title = { Text("使用默认人脸识别照片？") },
+            icon = {
+                Icon(
+                    painterResource(R.drawable.ic_triangle_alert),
+                    contentDescription = "警告",
+                    tint = Orange,
+                    modifier = Modifier.size(40.dp)
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(buildAnnotatedString {
+                        append("是否使用代签用户的学习通默认人脸识别照片代替拍摄？")
+                        withStyle(SpanStyle(color = Color.Red, fontWeight = FontWeight.Bold)) {
+                            append("此方式存在风险：使用账号原有照片可能被学习通风控校验识别，导致代签失败甚至影响账号安全。")
+                        }
+                    })
+                    if (isProcessingProfileImage) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Text(
+                                "正在获取默认人脸识别照片...(" +
+                                        "${profileImageProgress?.first ?: 0}/${profileImageProgress?.second ?: signUserName.size})"
+                            )
+                        }
                     }
                 }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !isProcessingProfileImage,
+                    onClick = {
+                        hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
+                        useProfileImage = true
+                    }
+                ) { Text("是") }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    enabled = !isProcessingProfileImage,
+                    onClick = {
+                        hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
+                        useProfileImage = false
+                    }
+                ) { Text("否") }
             }
-        },
-        confirmButton = {
-            Button(
-                enabled = !isProcessingProfileImage,
-                onClick = { useProfileImage = true }
-            ) { Text("是") }
-        },
-        dismissButton = {
-            OutlinedButton(
-                enabled = !isProcessingProfileImage,
-                onClick = { useProfileImage = false }
-            ) { Text("否") }
-        }
-    )
+        )
+    }
 
     if (useProfileImage == true) {
         LaunchedEffect(useProfileImage) {
@@ -134,21 +145,28 @@ fun FaceRecognitionComponent(
                 buildMap {
                     signUserName.forEachIndexed { index, (phoneNumber, _) ->
                         val url = ChaoxingFaceHelper.getUserProfileFaceImageUrl(
-                            ChaoxingHttpClientPool.get(context, phoneNumber)
+                            ChaoxingHttpRequesterPool.getRequester(context, phoneNumber)
                         )
                         val bitmap = withContext(Dispatchers.IO) {
                             profileImageHttpClient.newCall(
                                 Request.Builder().url(url).build()
                             ).execute().use { response ->
                                 response.body.byteStream().use { stream ->
-                                    BitmapFactory.decodeStream(stream)
-                                        ?: throw IllegalStateException("默认人脸识别照片下载失败")
+                                    val bytes = stream.readBytes()
+                                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                        ?: throw ChaoxingFaceImageException(
+                                            "默认人脸识别照片下载失败, body=${
+                                                bytes.toString(
+                                                    Charsets.UTF_8
+                                                )
+                                            }"
+                                        )
                                 }
                             }
                         }
                         put(
                             phoneNumber,
-                            randomizeStylizeFaceImage(bitmap).also { bitmap.recycle() }
+                            randomizeStylizeImage(bitmap).also { bitmap.recycle() }
                         )
                         profileImageProgress = index + 1 to signUserName.size
                     }
@@ -189,12 +207,13 @@ fun FaceRecognitionComponent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
             ) {
-                Text("拍摄给 ${signUserName[faceImageCapturedIndex].second} 人脸识别的图片")
+                Text("拍摄给 ${signUserName.getOrNull(faceImageCapturedIndex)?.second.orEmpty()} 人脸识别的图片")
             }
         }) {
             onFinish(
-                it.mapIndexed { index, bitmap -> signUserName[index].first to bitmap }
-                    .associate { it },
+                it.mapIndexedNotNull { index, bitmap ->
+                    signUserName.getOrNull(index)?.let { it.first to bitmap }
+                }.toMap(),
                 false
             )
         }

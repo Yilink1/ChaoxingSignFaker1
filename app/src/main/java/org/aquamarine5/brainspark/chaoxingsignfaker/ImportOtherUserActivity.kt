@@ -43,8 +43,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.umeng.analytics.MobclickAgent
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingOtherUserHelper
-import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingOtherUserSharedEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingImportOtherUserResultStatus
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingOtherUserSharedEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingPredictableException
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.UMengHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.toastReport
@@ -97,6 +97,9 @@ class ImportOtherUserActivity : ComponentActivity() {
                         ?.filter { it.isNotBlank() }
                         ?.distinct()
                         .orEmpty()
+                    val deviceCode = data?.getQueryParameter("dc")?.takeIf { it.isNotEmpty() }
+                    val uniqueId = data?.getQueryParameter("uid")?.takeIf { it.isNotEmpty() }
+                    val deviceModel = data?.getQueryParameter("dm")?.takeIf { it.isNotEmpty() }
                     Crossfade(errorTips) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -133,6 +136,9 @@ class ImportOtherUserActivity : ComponentActivity() {
                                                         pwd,
                                                         name,
                                                         faceObjectIds,
+                                                        deviceCode,
+                                                        uniqueId,
+                                                        deviceModel,
                                                     )
                                                 )
                                             }.onSuccess { result ->

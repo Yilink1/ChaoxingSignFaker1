@@ -37,7 +37,7 @@ object ChaoxingRecommendHelper {
         }
 
 
-    suspend fun getRecommendedCourses(context: Context): List<Pair<Int, Int>> {
+    suspend fun getRecommendedCourses(context: Context): List<Pair<Int, Long>> {
         val allHabits = getAllLearnedHabits(context)
         val now = LocalDateTime.now()
         val currentDayOfWeek = now.dayOfWeek.value
@@ -79,11 +79,11 @@ object ChaoxingRecommendHelper {
 
     suspend fun analyseRecommendHabit(
         classId: Int,
-        courseId: Int,
+        courseId: Long,
         recommendRecords: Map<Int, RecommendRecordList>,
         recommendHabits: List<RecommendHabit>,
         currentRecommendRecord: RecommendRecord,
-        client: ChaoxingHttpClient,
+        client: ChaoxingHttpRequester,
         builder: ChaoxingSignFakerDataStore.Builder
     ): ChaoxingSignFakerDataStore.Builder = withContext(Dispatchers.IO) {
         val allRelatedHabits = recommendHabits.filter { it.classId == classId }
@@ -135,8 +135,8 @@ object ChaoxingRecommendHelper {
     suspend fun recordRecommendEvent(
         context: Context,
         classId: Int,
-        courseId: Int,
-        client: ChaoxingHttpClient
+        courseId: Long,
+        client: ChaoxingHttpRequester
     ) =
         withContext(Dispatchers.IO) {
             disableCode {

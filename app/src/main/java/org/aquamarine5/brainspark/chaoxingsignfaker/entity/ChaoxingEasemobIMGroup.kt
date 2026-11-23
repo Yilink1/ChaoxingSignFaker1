@@ -11,6 +11,7 @@ import android.os.Bundle
 import androidx.compose.runtime.Immutable
 import androidx.navigation.NavType
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 @Immutable
@@ -20,21 +21,22 @@ data class ChaoxingEasemobIMGroup(
     val id: String,
     val imageUrl: String?
 ) {
-    object ChaoxingEasemobIMGroupNavType : NavType<ChaoxingEasemobIMGroup>(false) {
-        override fun get(bundle: Bundle, key: String): ChaoxingEasemobIMGroup? {
-            return Json.decodeFromString(bundle.getString(key) ?: return null)
+    object ChaoxingEasemobIMGroupListNavType : NavType<List<ChaoxingEasemobIMGroup>>(false) {
+        private val listSerializer = ListSerializer(serializer())
+        override fun get(bundle: Bundle, key: String): List<ChaoxingEasemobIMGroup>? {
+            return Json.decodeFromString(listSerializer, bundle.getString(key) ?: return null)
         }
 
-        override fun parseValue(value: String): ChaoxingEasemobIMGroup {
-            return Json.decodeFromString(Uri.decode(value))
+        override fun parseValue(value: String): List<ChaoxingEasemobIMGroup> {
+            return Json.decodeFromString(listSerializer, Uri.decode(value))
         }
 
-        override fun serializeAsValue(value: ChaoxingEasemobIMGroup): String {
-            return Uri.encode(Json.encodeToString(value))
+        override fun serializeAsValue(value: List<ChaoxingEasemobIMGroup>): String {
+            return Uri.encode(Json.encodeToString(listSerializer, value))
         }
 
-        override fun put(bundle: Bundle, key: String, value: ChaoxingEasemobIMGroup) {
-            bundle.putString(key, Json.encodeToString(value))
+        override fun put(bundle: Bundle, key: String, value: List<ChaoxingEasemobIMGroup>) {
+            bundle.putString(key, Json.encodeToString(listSerializer, value))
         }
     }
 }

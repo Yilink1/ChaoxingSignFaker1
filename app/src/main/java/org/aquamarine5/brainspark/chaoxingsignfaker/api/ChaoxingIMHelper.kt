@@ -6,26 +6,37 @@
 
 package org.aquamarine5.brainspark.chaoxingsignfaker.api
 
+import android.content.Context
 import android.util.Base64
 import com.alibaba.fastjson2.JSON
 import com.alibaba.fastjson2.JSONObject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.aquamarine5.brainspark.chaoxingsignfaker.BuildConfig
+import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.ChaoxingIMGroupClass
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.easemob.MessageBody
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.easemob.Meta
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingCourseEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingEasemobIMConfig
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingEasemobIMGroup
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingGroupSignActivityEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingIMConfig
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingIMGroup
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.ChaoxingParseDataException
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.chaoxingDataStore
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.checkResponseThrowException
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.requirePredictable
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
@@ -33,9 +44,11 @@ object ChaoxingIMHelper {
     private class ChaoxingIMConfigParseException(
         arg: String,
         message: String? = null,
-        data: String? = null
+        data: String? = null,
+        throwable: Throwable? = null
     ) : ChaoxingParseDataException(
         "IM配置解析异常: $arg 获取失败，${message ?: "未知错误"}",
+        throwable,
         data = data
     )
 
@@ -56,7 +69,9 @@ object ChaoxingIMHelper {
         "https://a1-vip6.easecdn.com/cx-dev/cxstudy/users/%s/messageroaming"
     const val USER_AGENT_EASEMOB = "Easemob-SDK(Android) 4.9.0.1"
 
-    val IM_ENCRYPTED_KEY = BuildConfig.imEncryptedKey.toByteArray(Charsets.UTF_8)
+    val IM_GROUP_CLASS_CACHE_INTERVAL = TimeUnit.DAYS.toMillis(1)
+
+    val IM_ENCRYPTED_KEY = "SL2(M/eD".toByteArray(Charsets.UTF_8)
 
     fun desDecrypt(imEncryptedPassword: String): String {
         @Suppress("GetInstance")
@@ -129,9 +144,68 @@ object ChaoxingIMHelper {
                         }
                     }
                 }
-
             }
         }
+    }
+
+    suspend fun updateIMGroupClassId(courses: List<ChaoxingCourseEntity>): List<ChaoxingIMGroupClass> {
+        val httpClient = ChaoxingHttpClient.instance
+        requirePredictable(httpClient != null) { "客户端未初始化，无法获取群聊列表" }
+        val imGroups = getEasemobIMGroups(httpClient, httpClient.getIMConfig())
+        val groupsByChatName = imGroups.groupBy { it.chatName }
+        return courses.groupBy { it.courseName }.mapNotNull { (courseName, matchedCourses) ->
+            val matchedGroups = groupsByChatName[courseName] ?: return@mapNotNull null
+            val chatIds = matchedGroups.mapNotNull { it.id.toLongOrNull() }.distinct()
+            if (chatIds.isEmpty()) return@mapNotNull null
+            ChaoxingIMGroupClass.newBuilder()
+                .addAllClassId(matchedCourses.map { it.classId.toLong() }.distinct())
+                .setCourseId(matchedCourses.first().courseId)
+                .addAllChatId(chatIds)
+                .setChatName(courseName)
+                .build()
+        }
+    }
+
+    suspend fun refreshIMGroupClassIds(
+        context: Context,
+        courses: List<ChaoxingCourseEntity>
+    ): List<ChaoxingIMGroupClass>? {
+        if (courses.isEmpty()) return null
+        val dataStoreData = context.chaoxingDataStore.data.first()
+        val lastUpdateTimestamp = dataStoreData.lastUpdateIMGroupClassTimestamp
+        if (lastUpdateTimestamp + IM_GROUP_CLASS_CACHE_INTERVAL > System.currentTimeMillis())
+            return null
+        val imGroupClassIds = updateIMGroupClassId(courses)
+        context.chaoxingDataStore.updateData { dataStore ->
+            dataStore.toBuilder()
+                .clearImGroupClassIds()
+                .addAllImGroupClassIds(imGroupClassIds)
+                .setLastUpdateIMGroupClassTimestamp(System.currentTimeMillis())
+                .build()
+        }
+        return imGroupClassIds
+    }
+
+    fun getEasemobIMGroupsByChatIds(
+        imGroupClasses: List<ChaoxingIMGroupClass>
+    ): List<ChaoxingEasemobIMGroup> {
+        return imGroupClasses.filter { it.chatIdCount > 0 }.flatMap { imGroupClass ->
+            imGroupClass.chatIdList.map { chatId ->
+                ChaoxingEasemobIMGroup(imGroupClass.chatName, chatId.toString(), null)
+            }
+        }.distinctBy { it.id }
+    }
+
+    suspend fun getEasemobIMGroupsByClassIds(
+        context: Context,
+        classIds: List<Long>
+    ): List<ChaoxingEasemobIMGroup> {
+        if (classIds.isEmpty()) return emptyList()
+        val targetClassIds = classIds.toSet()
+        val imGroupClasses = context.chaoxingDataStore.data.first().imGroupClassIdsList.filter {
+            it.classIdList.any { classId -> targetClassIds.contains(classId) }
+        }
+        return getEasemobIMGroupsByChatIds(imGroupClasses)
     }
 
     @Suppress("Deprecation")
@@ -179,7 +253,13 @@ object ChaoxingIMHelper {
                     runCatching {
                         return """<span\s+id="$id"[^>]*>(.*?)</span>""".toRegex(RegexOption.DOT_MATCHES_ALL)
                             .find(responseBody)?.groupValues?.get(1)?.trim()!!
-                    }.getOrElse { throw ChaoxingIMConfigParseException(id, it.message) }
+                    }.getOrElse {
+                        throw ChaoxingIMConfigParseException(
+                            id,
+                            it.message,
+                            throwable = it
+                        )
+                    }
                 }
 
                 val tuid = extractSpan("myTuid")
@@ -193,59 +273,104 @@ object ChaoxingIMHelper {
         }
     }
 
-    suspend fun parseIMMessageBody(imMessages: List<MessageBody>): List<ChaoxingGroupSignActivityEntity> {
-        val signActivities = mutableListOf<ChaoxingGroupSignActivityEntity>()
-        imMessages.forEach forEachImMessages@{
-            it.extList?.forEach { ext ->
-                if (ext.key == "attachment") {
-                    val attachObject = JSONObject.parseObject(ext.stringValue)
-                    if (attachObject.getInteger("attachmentType") == 15) {
-                        val signInfo = attachObject.getJSONObject("att_chat_course")
-                            ?: return@forEachImMessages
-                        val courseInfo =
-                            signInfo.getJSONObject("courseInfo") ?: return@forEachImMessages
-                        val activeId = signInfo.getLong("aid") ?: return@forEachImMessages
-                        if (activeId == 0L ||
-                            (signInfo.getInteger("atype") != 2 &&
-                                    signInfo.getInteger("atype") != 74)
-                        )
-                            return@forEachImMessages
-                        val classId = courseInfo.getInteger("classid")
-                        val courseId = courseInfo.getString("courseid").toInt()
-                        val activeTypeName = signInfo.getString("atypeName")
-                        signActivities.add(
-                            ChaoxingGroupSignActivityEntity(
-                                ChaoxingSignHelper.getIMSignDestination(
-                                    activeTypeName,
-                                    activeId,
-                                    classId,
-                                    courseId
-                                ) ?: throw ChaoxingIMConfigParseException(
-                                    "atypeName",
-                                    "未知签到类型: $activeTypeName",
-                                    attachObject.toJSONString()
-                                ),
-                                signInfo.getString("title"),
-                                activeId,
-                                classId,
-                                courseId,
-                                courseInfo.getString("coursename"),
-                                signInfo.getString("subTitle"),
-                                activeTypeName
-                            )
-                        )
-                    }
-                    return@forEachImMessages
+    data class IMSignActivityInfo(
+        val activeId: Long,
+        val title: String,
+        val classId: Int,
+        val courseId: Long,
+        val courseName: String,
+        val startTimeTitle: String,
+        val activeTypeName: String,
+        val isUnsupportedLegacySign: Boolean = false
+    )
+
+    fun resolveImPassword(imEncryptedPassword: String): String =
+        if (imEncryptedPassword.length >= 16)
+            runCatching { desDecrypt(imEncryptedPassword) }.getOrElse { imEncryptedPassword }
+        else imEncryptedPassword
+
+    fun parseIMSignActivityInfo(attachObject: JSONObject): IMSignActivityInfo? {
+        if (attachObject.getInteger("attachmentType") != 15) return null
+        val signInfo = attachObject.getJSONObject("att_chat_course") ?: return null
+        val activeId = signInfo.getLong("aid") ?: return null
+        if (activeId == 0L) return null
+        if (signInfo.getInteger("atype") != 2 && signInfo.getInteger("atype") != 74)
+            return null
+        val courseInfo = signInfo.getJSONObject("courseInfo")
+        return IMSignActivityInfo(
+            activeId,
+            signInfo.getString("title") ?: "",
+            courseInfo?.getInteger("classid") ?: 0,
+            courseInfo?.getLongValue("courseid") ?: 0L,
+            courseInfo?.getString("coursename") ?: "",
+            signInfo.getString("subTitle") ?: "",
+            signInfo.getString("atypeName") ?: "",
+            isUnsupportedLegacySign = courseInfo == null
+        )
+    }
+
+    fun buildSignActivityEntity(
+        scope: CoroutineScope,
+        activity: IMSignActivityInfo,
+        messageTimestamp: Long,
+        chatId: Long? = null,
+        isCloneSession: Boolean = false
+    ): ChaoxingGroupSignActivityEntity {
+        val destination =
+            scope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                if (activity.isUnsupportedLegacySign)
+                    return@async ChaoxingSignHelper.getLegacyIMSignDestination(
+                        activity.activeId,
+                        chatId,
+                        isCloneSession
+                    )
+                ChaoxingSignHelper.getIMSignDestination(
+                    activity.activeTypeName,
+                    activity.activeId,
+                    activity.classId,
+                    activity.courseId,
+                    isCloneSession
+                ) ?: throw ChaoxingIMConfigParseException(
+                    "atypeName",
+                    "未知签到类型: ${activity.activeTypeName}"
+                )
+            }
+        return ChaoxingGroupSignActivityEntity(
+            destination,
+            activity.title,
+            activity.activeId,
+            activity.classId,
+            activity.courseId,
+            activity.courseName,
+            activity.startTimeTitle,
+            activity.activeTypeName,
+            activity.isUnsupportedLegacySign,
+            messageTimestamp
+        )
+    }
+
+    fun parseIMMessageBody(
+        scope: CoroutineScope,
+        imMessages: List<Pair<Meta, MessageBody>>,
+        isCloneSession: Boolean = false
+    ): List<ChaoxingGroupSignActivityEntity> =
+        imMessages.mapNotNull { (meta, messageBody) ->
+            val chatId = messageBody.to?.name?.substringBefore("@")?.toLongOrNull()
+            messageBody.extList?.firstOrNull { it.key == "attachment" }?.let { ext ->
+                runCatching {
+                    parseIMSignActivityInfo(JSONObject.parseObject(ext.stringValue))
+                }.getOrNull()?.let { activity ->
+                    buildSignActivityEntity(scope, activity, meta.field4, chatId, isCloneSession)
                 }
             }
         }
-        return signActivities
-    }
 
     suspend fun fetchIMHistoryMessages(
         imGroup: ChaoxingEasemobIMGroup,
         httpClient: ChaoxingHttpClient,
-        imConfig: ChaoxingEasemobIMConfig
+        imConfig: ChaoxingEasemobIMConfig,
+        scope: CoroutineScope,
+        isCloneSession: Boolean = false
     ): List<ChaoxingGroupSignActivityEntity> {
         return withContext(Dispatchers.IO) {
             httpClient.newCall(
@@ -268,18 +393,57 @@ object ChaoxingIMHelper {
                 val json = JSON.parseObject(responseBody)
                 val data = json.getJSONObject("data")
                 val messages = data.getJSONArray("msgs")
-                val resultList = mutableListOf<MessageBody>()
+                val resultList = mutableListOf<Pair<Meta, MessageBody>>()
                 for (i in messages.indices) {
                     val msgObj = messages.getJSONObject(i)
                     val msgStr = msgObj.getString("msg")
                     val msgBytes = Base64.decode(msgStr, Base64.DEFAULT)
                     val meta = Meta.parseFrom(msgBytes)
                     val messageBody = MessageBody.parseFrom(meta.field6)
-                    resultList.add(messageBody)
+                    resultList.add(meta to messageBody)
                 }
-                return@use parseIMMessageBody(resultList)
+                return@use parseIMMessageBody(scope, resultList, isCloneSession).distinctBy { it.activeId }
             }
         }
+    }
+
+    private val START_TIME_TITLE_PATTERN =
+        """(?:(\d{2,4})-)?(\d{1,2})-(\d{1,2}) (\d{1,2}):(\d{1,2})""".toRegex()
+
+    private fun startTimeTitleSortKey(title: String): List<Int>? {
+        val groups = START_TIME_TITLE_PATTERN.find(title)?.groupValues ?: return null
+        val year = groups[1].toIntOrNull() ?: Int.MIN_VALUE
+        val rest = groups.drop(2).map { it.toIntOrNull() ?: return null }
+        if (rest.size != 4) return null
+        return listOf(year) + rest
+    }
+
+    suspend fun fetchIMHistoryMessages(
+        imGroups: List<ChaoxingEasemobIMGroup>,
+        httpClient: ChaoxingHttpClient,
+        imConfig: ChaoxingEasemobIMConfig,
+        scope: CoroutineScope,
+        isCloneSession: Boolean = false
+    ): List<ChaoxingGroupSignActivityEntity> {
+        return coroutineScope {
+            imGroups.map { group ->
+                async {
+                    fetchIMHistoryMessages(group, httpClient, imConfig, scope, isCloneSession)
+                }
+            }.awaitAll()
+        }.flatten()
+            .distinctBy { it.activeId }
+            .sortedWith(
+                compareBy(
+                    { startTimeTitleSortKey(it.startTimeTitle) == null },
+                    { startTimeTitleSortKey(it.startTimeTitle)?.getOrNull(0) },
+                    { startTimeTitleSortKey(it.startTimeTitle)?.getOrNull(1) },
+                    { startTimeTitleSortKey(it.startTimeTitle)?.getOrNull(2) },
+                    { startTimeTitleSortKey(it.startTimeTitle)?.getOrNull(3) },
+                    { startTimeTitleSortKey(it.startTimeTitle)?.getOrNull(4) },
+                    { it.startTimeTitle }
+                )
+            )
     }
 
     @Suppress("Deprecation")
@@ -290,7 +454,9 @@ object ChaoxingIMHelper {
     suspend fun fetchIMHistoryMessages(
         imGroup: ChaoxingIMGroup,
         httpClient: ChaoxingHttpClient,
-        imConfig: ChaoxingIMConfig
+        imConfig: ChaoxingIMConfig,
+        scope: CoroutineScope,
+        isCloneSession: Boolean = false
     ): List<ChaoxingGroupSignActivityEntity> {
         return withContext(Dispatchers.IO) {
             httpClient.newCall(
@@ -316,16 +482,16 @@ object ChaoxingIMHelper {
                 val json = JSON.parseObject(responseBody)
                 val data = json.getJSONObject("data")
                 val messages = data.getJSONArray("msgs")
-                val resultList = mutableListOf<MessageBody>()
+                val resultList = mutableListOf<Pair<Meta, MessageBody>>()
                 for (i in messages.indices) {
                     val msgObj = messages.getJSONObject(i)
                     val msgStr = msgObj.getString("msg")
                     val msgBytes = Base64.decode(msgStr, Base64.DEFAULT)
                     val meta = Meta.parseFrom(msgBytes)
                     val messageBody = MessageBody.parseFrom(meta.field6)
-                    resultList.add(messageBody)
+                    resultList.add(meta to messageBody)
                 }
-                return@use parseIMMessageBody(resultList)
+                return@use parseIMMessageBody(scope, resultList, isCloneSession)
             }
         }
     }

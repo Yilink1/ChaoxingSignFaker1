@@ -7,12 +7,12 @@
 package org.aquamarine5.brainspark.chaoxingsignfaker.utilities
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.os.Bundle
 import androidx.annotation.DrawableRes
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.createBitmap
 import com.baidu.mapapi.map.BaiduMap
 import com.baidu.mapapi.map.BitmapDescriptor
 import com.baidu.mapapi.map.BitmapDescriptorFactory
@@ -20,7 +20,12 @@ import com.baidu.mapapi.map.Marker
 import com.baidu.mapapi.map.MarkerOptions
 import com.baidu.mapapi.map.TitleOptions
 import com.baidu.mapapi.model.LatLng
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.toChaoxingLocation
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.ChaoxingLocation
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingLocationSignEntity
 
 fun BaiduMap.addOrUpdateLocationMarker(
     marker: Marker?,
@@ -66,9 +71,8 @@ const val MARKER_TITLE_FONT_SIZE = 30
 fun markerTitleOptions(text: String): TitleOptions =
     TitleOptions().text(text).titleFontSize(MARKER_TITLE_FONT_SIZE)
 
-// setTitleOptions 每次都会向 marker 追加一个新的标签视图而不会替换旧的，
-// 所以隐藏时不能用空 TitleOptions 覆盖，必须 clearRichViews() 移除已添加的标签
-fun BaiduMap.updateMarkerTitlesVisibility(
+
+fun updateMarkerTitlesVisibility(
     favoriteLocationMarkers: List<Marker>,
     lastSignedLocationMarker: Marker?,
     isTitleVisible: Boolean
@@ -93,7 +97,7 @@ fun Context.createBitmapDescriptorFromVector(
     backgroundColor: Int? = null,
     size: Int = 48
 ): BitmapDescriptor {
-    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val bitmap = createBitmap(size, size)
     val canvas = Canvas(bitmap)
     backgroundColor?.let { color ->
         canvas.drawCircle(
@@ -108,4 +112,21 @@ fun Context.createBitmapDescriptorFromVector(
         drawable.draw(canvas)
     }
     return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
+fun ChaoxingLocationSignEntity.saveSelectedLocation(
+    context: Context,
+    classId: Int,
+    coroutineScope: CoroutineScope,
+    onLocationChanged: (ChaoxingLocationSignEntity?) -> Unit
+) {
+    onLocationChanged(this)
+    coroutineScope.launch(Dispatchers.IO) {
+        context.chaoxingDataStore.updateData {
+            it.toBuilder().putClassSelectedLocation(
+                classId,
+                toChaoxingLocation()
+            ).build()
+        }
+    }
 }

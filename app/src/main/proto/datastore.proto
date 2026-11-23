@@ -14,15 +14,15 @@ message ChaoxingSignFakerDataStore{
   ChaoxingAnalysis analysis = 7;
   bool agreeTerms = 3;
   string deviceCode = 5 [deprecated = true];
-  repeated uint32 preferCourse = 6;
+  repeated uint32 preferCourse = 6 [deprecated = true];
   repeated uint32 preferClassId = 8;
-  map<uint32, RecommendRecordList> recommendRecords = 9;
-  repeated RecommendHabit recommendHabits = 10;
-  bool disableRecommend = 11;
-  uint32 version = 12;
-  repeated ChaoxingCourseClass preferCourseClass = 13;
+  map<uint32, RecommendRecordList> recommendRecords = 9 [deprecated = true];
+  repeated RecommendHabit recommendHabits = 10 [deprecated = true];
+  bool disableRecommend = 11 [deprecated = true];
+  uint32 version = 12 [deprecated = true];
+  repeated ChaoxingCourseClass preferCourseClass = 13 [deprecated = true];
   bool bypassBlockedChecking = 14;
-  uint32 tagsIncreaseId = 16;
+  uint32 tagsIncreaseId = 16 [deprecated = true];
   repeated OtherUserTagType tagsLibrary = 15;
   LearntTooltip learntTooltips = 17;
   Preferences preferences = 18;
@@ -35,6 +35,38 @@ message ChaoxingSignFakerDataStore{
   uint64 lastUploadAnalysisTimestamp = 25;
   string selectedAnalysisRankSchoolName = 27;
   repeated ChaoxingLocation dontSaveNearbyPosition = 28;
+  repeated string preferGroupId = 29;
+  ChaoxingClassSchedule classSchedule = 30;
+  map<uint32, ChaoxingLocation> classRememberedLocation = 31;
+  map<uint32, ChaoxingLocation> classSelectedLocation = 32;
+  repeated ChaoxingIMGroupClass imGroupClassIds = 33;
+  uint64 lastUpdateIMGroupClassTimestamp = 34;
+}
+
+message ChaoxingIMGroupClass{
+  repeated uint64 classId = 1;
+  uint64 courseId = 2;
+  repeated uint64 chatId = 3;
+  string chatName = 4;
+}
+
+message ChaoxingClassSchedule{
+  repeated ChaoxingLesson lessons = 1;
+  uint64 lastFetchTimestamp = 2;
+  uint64 firstWeekDate = 3;
+  string contentMd5 = 4;
+}
+
+message ChaoxingLesson{
+  uint64 courseId = 1;
+  uint32 classId = 2;
+  string courseName = 3;
+  string teacherName = 4;
+  uint32 dayOfWeek = 5;
+  uint32 startMinuteOfDay = 6;
+  uint32 endMinuteOfDay = 7;
+  string location = 8;
+  string weeks = 9;
 }
 
 message ChaoxingFaceRecognitionImage{
@@ -55,10 +87,12 @@ message Preferences{
   string customizedPackageName = 5;
   uint32 displayRankCount = 6;
   bool alwaysForceSign = 7;
+  bool isIgnoreAllConsistentDeviceCodeComponents = 8;
+  bool isAllowExternalProviderFetchInformation = 9;
 }
 
 message ChaoxingCourseClass{
-  uint32 courseId = 1;
+  uint64 courseId = 1;
   uint32 classId = 2;
 }
 
@@ -73,6 +107,9 @@ message LearntTooltip{
   bool supportCloneOtherUserSession = 8;
   bool sliderCaptchaAutoResolveByModel = 9;
   bool saveFaceRecognitionImagesToLocal = 10;
+  bool qrCodeSupportKeepScanning = 11;
+  bool supportConsistentDeviceCodeInOtherSession = 12;
+  bool fetchGestureSignCodeDirectly = 13;
 }
 
 message OtherUserTagType{
@@ -103,6 +140,13 @@ message ChaoxingLoginSession{
   string phoneNumber = 2;
   string password = 3;
   string faceImageObjectId = 4 [deprecated = true];
+  optional uint32 configuredFid = 5;
+  optional uint32 puid = 6;
+  optional string deviceCode = 7;
+  bool isNotRandomizedDeviceCode = 8;
+  string name = 9;
+  bool isDeviceCodeDuplicatedSignBefore = 10;
+  optional string uniqueId = 11;
 }
 
 message ChaoxingOtherUserSession{
@@ -113,6 +157,14 @@ message ChaoxingOtherUserSession{
   repeated uint32 tags = 5;
   string faceImageObjectId = 6 [deprecated = true];
   bool isObsoleteSession = 7;
+  optional uint32 configuredFid = 8;
+  optional uint32 puid = 9;
+  optional string deviceCode = 10;
+  bool isNotRandomizedDeviceCode = 11;
+  bool isDeviceCodeDuplicatedSignBefore = 12;
+  optional string uniqueId = 13;
+  optional string deviceModel = 14;
+  bool isEnhancedDeviceInformation = 15;
 }
 
 message HttpCookie{
@@ -128,14 +180,14 @@ message RecommendRecordList{
 message RecommendRecord{
   uint32 dayOfWeek = 1;
   uint32 minuteOfDay = 2;
-  uint32 courseId = 3;
+  uint64 courseId = 3;
 }
 
 message RecommendHabit{
   uint32 dayOfWeek = 1;
   uint32 minuteOfDay = 2;
   uint32 classId = 3;
-  uint32 courseId = 5;
+  uint64 courseId = 5;
   uint32 recordCount = 4;
   string className = 6;
 }

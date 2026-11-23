@@ -8,6 +8,8 @@
 ![GitHub License](https://img.shields.io/github/license/aquamarine5/ChaoxingSignFaker)
 [![Download count](https://img.shields.io/github/downloads/aquamarine5/ChaoxingSignFaker/total)]()
 
+<a href="https://trendshift.io/repositories/132022?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-132022" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/132022" alt="aquamarine5%2FChaoxingSignFaker | Trendshift" width="250" height="55"/></a>
+
 > [!CAUTION]
 > ChaoxingSignFaker（随地大小签）是一个开源应用，使用AGPLv3.0许可证发布。开源代码本源为让源代码对所有人开发，保持代码的开放性并欢迎任何人参与到项目的开发中来，但**不欢迎**任何形式的修改代码、名称等进行二次分发、换皮和商业化等行为。
 
@@ -25,19 +27,17 @@
 
 ## 功能
 
-> [!TIP]
-> 目前v1.13.6+版本已支持群聊内发起的签到，并简单的支持了人脸识别签到。  
-> v1.14.7+版本支持了新版本（26/05/30学习通更新）的人脸识别签到（[#166](https://github.com/aquamarine5/ChaoxingSignFaker/pull/166) 感谢[@miloce](https://github.com/miloce)提供技术支持）
-
+- 使用一台设备登录多账号来签到（通过扫码、链接等方式添加其他账号）
 - 随意指定当前的位置以完成位置签到
 - 从图库选择照片以完成拍照签到
 - 为自己和其他账号完成二维码签到 **（需要一台设备在现场扫码，理论上可为任意多的用户签到）**
-- 使用一台设备登录多账号来签到（通过扫码、链接等方式添加其他账号）
-- 完成单击按钮类型的签到
-- 完成任意有验证码的签到
-- 完成签到之后的发布的签退操作
-- 手势签到和验证码签到
-- 群聊签到和人脸识别签到
+- 支持点击签到
+- 支持自动滑动有验证码的签到
+- 支持签到之后的发布的签退操作
+- 支持手势签到和签到码签到（暂不支持破解手势码和签到码）
+- 支持从群聊获取签到
+- 支持自动获取人脸照片完成人脸识别签到
+- 支持学习通的校园定制版的签到操作
 
 ## 开发
 
@@ -50,14 +50,16 @@
 > [!TIP]
 > ChaoxingSignFaker（随地大小签） 使用 [Stackbricks](https://github.com/aquamarine5/Stackbricks) 来实现更新逻辑，同样由本作者维护。
 
-## Star History
-
 <a href="https://www.star-history.com/?repos=aquamarine5%2FChaoxingSignFaker&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=aquamarine5/ChaoxingSignFaker&type=date&theme=dark&legend=top-left&sealed_token=2tB39V5sIQP1AisYOMEuqkmUfMEhoBsMDca3YHTs5yegOyih3XJhbwC7s8PzwTTGA8fqlhtGfNSr1p3lWR0TjJ_Y5XndVG6Rr5VyRIcd6hk_u5yoktSPYQ" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=aquamarine5/ChaoxingSignFaker&type=date&legend=top-left&sealed_token=2tB39V5sIQP1AisYOMEuqkmUfMEhoBsMDca3YHTs5yegOyih3XJhbwC7s8PzwTTGA8fqlhtGfNSr1p3lWR0TjJ_Y5XndVG6Rr5VyRIcd6hk_u5yoktSPYQ" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=aquamarine5/ChaoxingSignFaker&type=date&legend=top-left&sealed_token=2tB39V5sIQP1AisYOMEuqkmUfMEhoBsMDca3YHTs5yegOyih3XJhbwC7s8PzwTTGA8fqlhtGfNSr1p3lWR0TjJ_Y5XndVG6Rr5VyRIcd6hk_u5yoktSPYQ" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=aquamarine5/ChaoxingSignFaker&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=aquamarine5/ChaoxingSignFaker&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=aquamarine5/ChaoxingSignFaker&type=date&legend=top-left" />
  </picture>
 </a>
+
+![Recorded sign counts](analysis/signCount.svg)
+
+![Analyser user counts](analysis/userCount.svg)
 
 ![Alt](https://repobeats.axiom.co/api/embed/629e66a936ab63b8d91a7dceb42437d55857900e.svg "Repobeats analytics image")

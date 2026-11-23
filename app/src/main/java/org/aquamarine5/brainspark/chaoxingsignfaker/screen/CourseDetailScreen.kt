@@ -16,12 +16,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -29,28 +32,36 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import org.aquamarine5.brainspark.chaoxingsignfaker.R
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingActivityHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingIMHelper
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CenterCircularProgressIndicator
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.CourseSignActivityColumnCard
 import org.aquamarine5.brainspark.chaoxingsignfaker.components.NetworkExceptionComponent
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingCourseActivitiesEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingCourseEntity
+import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingEasemobIMGroup
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.LocalSnackbarHostState
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.checkPredictable
+import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.requirePredictable
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.snackbarReport
 import java.time.Instant
 import java.time.LocalDate
@@ -59,13 +70,17 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.time.Duration.Companion.milliseconds
 
-typealias CourseDetailDestination = ChaoxingCourseEntity
+@Serializable
+data class CourseDetailDestination(
+    val courses: List<ChaoxingCourseEntity>
+)
 
 @Composable
 fun CourseDetailScreen(
-    courseEntity: ChaoxingCourseEntity,
+    destination: CourseDetailDestination,
     navToSignerDestination: (Any) -> Unit,
     navToNonCloningListDestination: () -> Unit,
+    navToGroupDetailDestination: (GroupDetailDestination) -> Unit,
     navToListDestination: () -> Unit
 ) {
     var activitiesData by remember { mutableStateOf<ChaoxingCourseActivitiesEntity?>(null) }
@@ -75,15 +90,45 @@ fun CourseDetailScreen(
     val coroutineScope = rememberCoroutineScope()
     val activitiesListState = rememberLazyListState()
     var isFetchedFailure by remember { mutableStateOf<Result<*>?>(null) }
+    var partialFailureCount by remember { mutableIntStateOf(0) }
+    val courses = destination.courses
+    val courseEntity = courses.firstOrNull()
+    if (courseEntity == null) {
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("课程数据缺失，请返回重试")
+        }
+        return
+    }
+    val isCloneSession = courseEntity.isCloneSession
+    var imGroupsForCourse by remember { mutableStateOf<List<ChaoxingEasemobIMGroup>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        runCatching {
+            ChaoxingIMHelper.getEasemobIMGroupsByClassIds(
+                context,
+                courses.map { it.classId.toLong() }
+            )
+        }.onSuccess {
+            imGroupsForCourse = it
+        }
+    }
     LaunchedEffect(Unit) {
         isFetchedFailure = runCatching {
             if (activitiesData == null) {
-                ChaoxingHttpClient.getHttpInstanceOrClone(courseEntity.isCloneSession)?.let {
-                    activitiesData = ChaoxingActivityHelper.getActivitiesEntity(
-                        it,
-                        courseEntity
-                    )
-                }
+                val client = ChaoxingHttpClient.getClientInstanceOrClone(isCloneSession)
+                requirePredictable(client != null) { "登录会话已失效，请重新登录" }
+                partialFailureCount = 0
+                activitiesData = ChaoxingActivityHelper.getActivitiesEntity(
+                    client,
+                    courses,
+                    onPartialFailure = { partialFailureCount = it }
+                )
+                checkPredictable(activitiesData != null) { "获取签到信息失败" }
             }
         }.onFailure {
             it.snackbarReport(
@@ -115,11 +160,84 @@ fun CourseDetailScreen(
                     .width(5.dp)
             )
             Text(
-                "课程名称：${courseEntity.courseName}",
+                "课程名称：${courseEntity.courseName}" + if (courses.size > 1) " (x${courses.size})" else "",
                 style = MaterialTheme.typography.titleMedium
             )
         }
-        Spacer(modifier = Modifier.height(12.dp))
+        if (courses.size > 1) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_info),
+                    contentDescription = null,
+                    tint = Color.Gray,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    "此课程名称在课程列表里面出现了${courses.size}次，已将所有班级的签到活动合并显示。",
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    color = Color.Gray
+                )
+            }
+        }
+        if (partialFailureCount > 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_x),
+                    contentDescription = null,
+                    tint = Color.Gray,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    "有${partialFailureCount}个班级的签到活动获取失败，已显示其余班级的签到活动。",
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    color = Color.Gray
+                )
+            }
+        }
+
+        if (imGroupsForCourse.isNotEmpty()) {
+            Button(
+                onClick = {
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.ContextClick)
+                    navToGroupDetailDestination(
+                        GroupDetailDestination(imGroupsForCourse, isCloneSession)
+                    )
+                },
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_users_round),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text("找不到签到？去对应的群聊看看")
+                }
+            }
+        }
+
         Crossfade(isFetchedFailure, modifier = Modifier.weight(1f)) { v ->
             if (v == null) {
                 CenterCircularProgressIndicator()
@@ -128,14 +246,17 @@ fun CourseDetailScreen(
                     coroutineScope.launch {
                         isFetchedFailure = runCatching {
                             if (activitiesData == null) {
-                                ChaoxingHttpClient.getHttpInstanceOrClone(courseEntity.isCloneSession)
-                                    ?.let {
-                                        activitiesData = ChaoxingActivityHelper.getActivitiesEntity(
-                                            it,
-                                            courseEntity
-                                        )
-                                        activitiesListState.animateScrollToItem(0)
-                                    }
+                                val client =
+                                    ChaoxingHttpClient.getClientInstanceOrClone(isCloneSession)
+                                requirePredictable(client != null) { "登录会话已失效，请重新登录" }
+                                partialFailureCount = 0
+                                activitiesData = ChaoxingActivityHelper.getActivitiesEntity(
+                                    client,
+                                    courses,
+                                    onPartialFailure = { partialFailureCount = it }
+                                )
+                                checkPredictable(activitiesData != null) { "获取签到信息失败" }
+                                activitiesListState.animateScrollToItem(0)
                             }
                         }.onFailure {
                             it.snackbarReport(
@@ -167,13 +288,16 @@ fun CourseDetailScreen(
                         pullToRefreshState = true
                         coroutineScope.launch {
                             runCatching {
-                                ChaoxingHttpClient.getHttpInstanceOrClone(courseEntity.isCloneSession)
-                                    ?.let {
-                                        activitiesData = ChaoxingActivityHelper.getActivitiesEntity(
-                                            it,
-                                            courseEntity
-                                        )
-                                    }
+                                val client =
+                                    ChaoxingHttpClient.getClientInstanceOrClone(isCloneSession)
+                                requirePredictable(client != null) { "登录会话已失效，请重新登录" }
+                                partialFailureCount = 0
+                                activitiesData = ChaoxingActivityHelper.getActivitiesEntity(
+                                    client,
+                                    courses,
+                                    onPartialFailure = { partialFailureCount = it }
+                                )
+                                checkPredictable(activitiesData != null) { "获取签到信息失败" }
                             }.onFailure {
                                 it.snackbarReport(
                                     snackbarHost,
@@ -187,7 +311,10 @@ fun CourseDetailScreen(
                         }
                     }
                 ) {
-                    if (activitiesData!!.signActivities.isEmpty()) {
+                    val currentActivitiesData = activitiesData
+                    if (currentActivitiesData == null) {
+                        CenterCircularProgressIndicator()
+                    } else if (currentActivitiesData.signActivities.isEmpty()) {
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -208,8 +335,11 @@ fun CourseDetailScreen(
                             state = activitiesListState,
                             modifier = Modifier.fillMaxSize()
                         ) {
+                            item {
+                                Spacer(modifier = Modifier.height(12.dp))
+                            }
                             items(
-                                items = activitiesData!!.signActivities,
+                                items = currentActivitiesData.signActivities,
                                 key = { it.id }
                             ) { activity ->
                                 CourseSignActivityColumnCard(activity, { startTimestamp ->
@@ -221,7 +351,7 @@ fun CourseDetailScreen(
                                                 yearDateFormatter.format(it)
                                             }
                                         }
-                                }, courseEntity.isCloneSession) { destination ->
+                                }, isCloneSession, isMerged = courses.size > 1) { destination ->
                                     navToSignerDestination(destination)
                                 }
                             }

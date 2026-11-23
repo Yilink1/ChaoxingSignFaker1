@@ -12,14 +12,14 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingActivityHelper.NO_SIGN_OFF_EVENT
-import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpClient
+import org.aquamarine5.brainspark.chaoxingsignfaker.api.ChaoxingHttpRequester
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingLocationSignEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.entity.ChaoxingSignOutEntity
 import org.aquamarine5.brainspark.chaoxingsignfaker.screen.PasswordSignDestination
 import org.aquamarine5.brainspark.chaoxingsignfaker.utilities.checkResponseThrowException
 
 class ChaoxingPasswordSigner(
-    client: ChaoxingHttpClient,
+    client: ChaoxingHttpRequester,
     private val destination: PasswordSignDestination,
     baseSignInfo: JSONObject? = null
 ) : ChaoxingSigner(
@@ -28,15 +28,13 @@ class ChaoxingPasswordSigner(
     destination.classId,
     destination.courseId,
     destination.extContent,
-    baseSignInfo
+    baseSignInfo,
+    destination.isOldSignVersion,
+    destination.chatId
 ) {
     companion object {
         private val URL_CHECK_SIGN_CODE =
             "https://mobilelearn.chaoxing.com/widget/sign/pcStuSignController/checkSignCode".toHttpUrl()
-    }
-
-    override suspend fun checkAlreadySign(response: String): Boolean {
-        return response.contains("输入发起者设置的签到码完成签到").not()
     }
 
     suspend fun getPasswordInfo(): Pair<Int, ChaoxingSignOutEntity> = withContext(Dispatchers.IO) {
@@ -70,55 +68,59 @@ class ChaoxingPasswordSigner(
 
     suspend fun sign(
         signCode: String,
-        position: ChaoxingLocationSignEntity? = null
+        position: ChaoxingLocationSignEntity? = null,
+        captchaValidate: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        if (isCaptchaRequired()) return@withContext true
-        client.newCall(
-            Request.Builder().url(
-                URL_SIGN.newBuilder()
-                    .addQueryParameter("latitude", if(position != null) "%.6f".format(position.latitude) else "")
-                    .addQueryParameter("longitude", if(position != null)  "%.6f".format(position.longitude) else "")
-                    .addQueryParameter("activeId", destination.activeId.toString())
-                    .addQueryParameter("uid", client.userEntity.puid.toString())
-                    .addQueryParameter("name", client.userEntity.name)
-                    .addQueryParameter("fid", client.userEntity.fid.toString())
-                    .addQueryParameter("signCode", signCode)
-                    .addQueryParameter("deviceCode", client.deviceCode)
-                    .addLocationResultParameter(position)
-                    .addLocationParameter(position,false)
-                    .build()
-            ).build()
-        ).execute().use {
-            it.checkResponseThrowException()
-            return@use it.checkSignResult()
-        }
-    }
-
-    suspend fun signWithCaptcha(
-        signCode: String,
-        validateValue: String,
-        position: ChaoxingLocationSignEntity? = null
-    ) =
-        withContext(Dispatchers.IO) {
-            client.newCall(
+        if (isOldSignVersion) {
+            return@withContext client.newCall(
                 Request.Builder().url(
-                    URL_SIGN.newBuilder()
-                        .addQueryParameter("latitude", if(position != null) "%.6f".format(position.latitude) else "")
-                        .addQueryParameter("longitude", if(position != null)  "%.6f".format(position.longitude) else "")
-                        .addQueryParameter("activeId", destination.activeId.toString())
-                        .addQueryParameter("uid", client.userEntity.puid.toString())
-                        .addQueryParameter("name", client.userEntity.name)
-                        .addQueryParameter("fid", client.userEntity.fid.toString())
-                        .addQueryParameter("signCode", signCode)
-                        .addQueryParameter("deviceCode", client.deviceCode)
-                        .addLocationResultParameter(position)
-                        .addQueryParameter("validate", validateValue)
-                        .addLocationParameter(position,false)
-                        .build()
+                    buildOldSignUrlBuilder().build()
                 ).build()
             ).execute().use {
                 it.checkResponseThrowException()
                 return@use it.checkSignResult()
             }
         }
+        client.newCall(
+            Request.Builder().url(
+                URL_SIGN_NO_PARAMETER.newBuilder()
+                    .addQueryParameter("activeId", destination.activeId.toString())
+                    .addCourseIdParameter()
+                    .addQueryParameter("uid", client.puid.toString())
+                    .addQueryParameter("clientip", "")
+                    .addQueryParameter(
+                        "latitude",
+                        if (position != null) "%.6f".format(position.randomizedLatitude) else "-1"
+                    )
+                    .addQueryParameter(
+                        "longitude",
+                        if (position != null) "%.6f".format(position.randomizedLongitude) else "-1"
+                    )
+                    .addQueryParameter("appType", "15")
+                    .addQueryParameter("fid", client.configuredFid.toString())
+                    .addQueryParameter("name", client.name)
+                    .addQueryParameter("signCode", signCode)
+                    .addQueryParameter("deviceCode", client.deviceCode)
+                    .addLocationParameter(position, false)
+                    .addLocationResultParameter(position)
+                    .addEnc2Parameter(signEnc2)
+                    .addValidateQueryParameter(captchaValidate)
+                    .build()
+            ).header(
+                "Referer", getOriginPreSignUrl().toString()
+            ).postSignForm().build()
+        ).execute().use {
+            it.checkResponseThrowException()
+            return@use it.checkSignResult(position)
+        }
+    }
+
+    @Deprecated("Use sign instead", ReplaceWith("sign(signCode, position, captchaValidate)"))
+    suspend fun signWithCaptcha(
+        signCode: String,
+        validateValue: String,
+        position: ChaoxingLocationSignEntity? = null
+    ) = sign(signCode, position, validateValue)
+
+    override val notSignedPageMarkers: List<String> = listOf("输入发起者设置的签到码完成签到")
 }
